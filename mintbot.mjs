@@ -432,11 +432,13 @@ async function setup() {
   } catch {
     throw new Error('Private key khong hop le.');
   }
-  const pass = await ask('Dat mat khau cho keystore: ', true);
-  if (pass.length < 8) throw new Error('Mat khau can it nhat 8 ky tu.');
+  const pass = await ask('Dat mat khau cho keystore (it nhat 12 ky tu): ', true);
+  if (pass.length < 12) throw new Error('Mat khau can it nhat 12 ky tu.');
   if ((await ask('Nhap lai mat khau: ', true)) !== pass) throw new Error('Hai mat khau khong khop.');
-  console.log('Dang ma hoa (vai giay)...');
-  fs.writeFileSync(KEYSTORE_FILE, await w.encrypt(pass));
+  console.log('Dang ma hoa (5-20 giay)...');
+  // Chuan keystore Ethereum (scrypt + AES-128-CTR), N gap doi mac dinh -> do mat khau cham gap doi
+  const json = await ethers.encryptKeystoreJson({ address: w.address, privateKey: w.privateKey }, pass, { scrypt: { N: 1 << 18 } });
+  fs.writeFileSync(KEYSTORE_FILE, json, { mode: 0o600 });
   console.log(`Da luu ${KEYSTORE_FILE}\nDia chi vi: ${w.address}`);
   if (process.env.WATCH_WALLET && process.env.WATCH_WALLET.toLowerCase() !== w.address.toLowerCase()) {
     console.log(`CANH BAO: khac WATCH_WALLET (${process.env.WATCH_WALLET}) trong .env`);
