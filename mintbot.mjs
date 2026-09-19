@@ -31,8 +31,8 @@ const KEYSTORE_FILE = path.join(__dirname, 'wallet.keystore.json');
 const JOBS_FILE = path.join(__dirname, 'mint-jobs.json');
 const HTTP_TIMEOUT_MS = 15_000;
 const TICK_MS = 500;
-const PREP_PUBLIC_MS = 60_000; // chuan bi + ky san truoc gio mo public
-const PREP_SIGNED_MS = 20_000;
+// Bat dau chay truoc gio mo bao lau (mac dinh 60s: mint 19:00 thi 18:59 chay). Doi bang MINT_LEAD_SECONDS
+const LEAD_MS = Number(process.env.MINT_LEAD_SECONDS || 60) * 1000;
 const STALE_MESSAGE_S = 10 * 60;
 const PRICE_POLL_MS = Number(process.env.PRICE_POLL_MINUTES || 2) * 60_000;
 const AUTO_ALERT_PCT = 20; // mint xong tu canh floor lech 20% so voi gia mint
@@ -766,7 +766,7 @@ async function scheduler() {
     const now = Date.now();
     for (const job of db.jobs) {
       if (job.status !== 'pending') continue;
-      const lead = job.stageType === 'public_sale' ? PREP_PUBLIC_MS : PREP_SIGNED_MS;
+      const lead = LEAD_MS;
       const at = job.runAt ? Date.parse(job.runAt) : Date.parse(job.startTime) - lead;
       if (at > now) continue;
       job.status = 'running';
