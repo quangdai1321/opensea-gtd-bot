@@ -23,7 +23,7 @@ import { ethers } from 'ethers';
 import { chainCtx, CHAINS } from './lib/chains.mjs';
 import { readPublicDrop } from './lib/seadrop.mjs';
 import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
-import { mintPublic, mintSigned } from './lib/engine.mjs';
+import { mintPublic, mintSigned, mintNow } from './lib/engine.mjs';
 import { fetchStats, statsText, parseAlert, alertLabel, evalAlert } from './lib/prices.mjs';
 import { hasAuth, jwtExpiry, fetchEligibility, eligIcon } from './lib/eligibility.mjs';
 
@@ -235,8 +235,15 @@ async function completeJob(job) {
 }
 
 async function runJob(job, { dry = false } = {}) {
-  await completeJob(job);
-  const ctx = chainCtx(job.chain);
+  // Mint ngay stage dang mo: duong nhanh, khong cho doc drop truoc
+  const fast = !dry && Boolean(job.runAt && job.slug);
+  let dropP;
+  if (fast) {
+    dropP = getDrop(job.slug);
+    dropP.catch(() => {});
+  } else {
+    await completeJob(job);
+  }
   job.results ??= {};
   const targets = activeWallets().filter((w) => !['done', 'sent'].includes(job.results[w.address]?.status));
   if (targets.length === 0) {
@@ -244,7 +251,6 @@ async function runJob(job, { dry = false } = {}) {
     return dry ? null : finish(job, 'failed');
   }
   const isPublic = job.stageType === 'public_sale';
-  const tag = `${job.name} — ${job.label}`;
   log(dry ? 'thu' : 'mint', `#${job.id}`, job.slug, job.label, `x${job.qty}`, `${targets.length} vi`);
 
   const results = await Promise.all(targets.map(async (w) => {
@@ -261,9 +267,10 @@ async function runJob(job, { dry = false } = {}) {
     };
     let r;
     try {
-      r = isPublic
-        ? await mintPublic(ctx, opts)
-        : await mintSigned(ctx, { ...opts, price: job.price, startTime: job.startTime, endTime: job.endTime, buildMint: (m, q) => buildMint(job.slug, m, q) });
+      const build = (m, q) => buildMint(job.slug, m, q);
+      if (fast) r = await mintNow({ ...opts, dropP, buildMint: build, getCtx: chainCtx });
+      else if (isPublic) r = await mintPublic(chainCtx(job.chain), opts);
+      else r = await mintSigned(chainCtx(job.chain), { ...opts, price: job.price, startTime: job.startTime, endTime: job.endTime, buildMint: build });
     } catch (err) {
       r = { status: 'failed', note: err.shortMessage || err.message };
     }
@@ -274,10 +281,24 @@ async function runJob(job, { dry = false } = {}) {
     return { w, r };
   }));
 
+  if (fast) {
+    // Bo sung thong tin that tu drop (lenh /mint chi co slug)
+    const drop = await dropP.catch(() => null);
+    if (drop) {
+      const st = drop.active_stage;
+      Object.assign(job, {
+        name: drop.collection_name, chain: drop.chain, contract: drop.contract_address,
+        label: st?.label || job.label, stageType: st?.stage_type || job.stageType, price: st?.price || job.price || '0',
+      });
+    }
+  }
+  const txUrl = (h) => (job.chain ? chainCtx(job.chain).txUrl(h) : h);
   const icon = { done: '✅', failed: '❌', skipped: '⏭', dry: '🧪' };
-  const lines = results.map(({ w, r }) => `${icon[r.status] || '•'} ${w.name} ${short(w.address)}: ${r.note || ''}${r.hash ? `\n   ${ctx.txUrl(r.hash)}` : ''}`);
-  const head = dry ? `🧪 CHẠY THỬ (không gửi gì): ${tag} x${job.qty}` : `${results.some((x) => x.r.status === 'done') ? '✅ XONG' : '❌ KHÔNG MINT ĐƯỢC'}: ${tag} x${job.qty}`;
-  await say(`${head}\n${isPublic ? 'Gọi thẳng contract (mintPublic)' : 'Chữ ký OpenSea → contract (mintSigned)'}\n\n${lines.join('\n')}`);
+  const lines = results.map(({ w, r }) => `${icon[r.status] || '•'} ${w.name} ${short(w.address)}: ${r.note || ''}${r.hash ? `\n   ${txUrl(r.hash)}` : ''}`);
+  const done = `${job.name || job.slug} — ${job.label || 'stage đang mở'}`;
+  const head = dry ? `🧪 CHẠY THỬ (không gửi gì): ${done} x${job.qty}` : `${results.some((x) => x.r.status === 'done') ? '✅ XONG' : '❌ KHÔNG MINT ĐƯỢC'}: ${done} x${job.qty}`;
+  const how = fast ? 'Mint ngay (song song)' : isPublic ? 'Gọi thẳng contract (mintPublic)' : 'Chữ ký OpenSea → contract (mintSigned)';
+  await say(`${head}\n${how}\n\n${lines.join('\n')}`);
   if (dry) return null;
   const ok = results.some((x) => x.r.status === 'done');
   if (ok) autoPriceAlert(job);
@@ -643,6 +664,7 @@ async function onText(text) {
       'Dán link OpenSea (opensea.io/collection/...) để xem lịch, hẹn auto mint, hoặc 🧪 chạy thử.',
       'Dán địa chỉ contract 0x... (kèm tên chain nếu biết, vd: 0xabc... base) → bot tự tìm chain, hẹn mint Public thẳng contract.',
       'Dán / chuyển tiếp tin có nhiều link (Discord, Twitter...) → bot tự theo dõi hết, báo khi ví có GTD/WL, nhắc 60 phút trước giờ mở, tự bỏ khi dự án mint xong.',
+      '/mint <link> 2 — mint NGAY stage đang mở (nhanh nhất), x2 mỗi ví',
       '/list — các lần hẹn',
       '/wallets — bật/tắt ví tham gia',
       '/max 0.01 — giới hạn giá + gas mỗi ví mỗi lần (/max off để bỏ)',
@@ -676,6 +698,13 @@ async function onText(text) {
     return addAlert(slug, rule);
   }
   if (cmd === '/alerts') return listAlerts();
+  if (cmd === '/mint') {
+    const parts = text.trim().split(/\s+/).slice(1);
+    const slug = argSlug(parts[0]);
+    const qty = Number(parts[1] || 1);
+    if (!slug || !(qty >= 1 && qty <= 100)) return say('Ví dụ: /mint <link OpenSea> 2 — mint NGAY stage đang mở, x2 mỗi ví');
+    return startNow({ slug, name: slug, label: 'stage đang mở', stageUuid: `now:${slug}:${Date.now()}`, qty });
+  }
   if (cmd === '/watch') {
     const slug = argSlug(arg);
     if (!slug) return listWatch();
@@ -762,6 +791,20 @@ async function priceLoop() {
   }
 }
 
+/** Mint ngay: chay LUON, khong cho vong hen gio, khong cho gui tin xong */
+function startNow(partial) {
+  const now = new Date().toISOString();
+  const job = { id: db.nextId++, ...partial, status: 'running', runAt: now, createdAt: now };
+  db.jobs.push(job);
+  saveJobs();
+  runJob(job).catch(async (err) => {
+    log('[mint]', err.message);
+    await say(`❌ Lỗi khi mint #${job.id}: ${err.message}`);
+    finish(job, 'failed');
+  });
+  return say(`⚡ Đang mint ${job.name || job.slug} x${job.qty} trên ${activeWallets().length} ví...`);
+}
+
 async function onButton(id) {
   const act = actions.get(id);
   if (!act) return say('Nút này đã cũ (bot vừa khởi động lại). Dán lại link để có nút mới.');
@@ -799,15 +842,15 @@ async function onButton(id) {
     return runJob({ id: 0, ...act.job }, { dry: true });
   }
 
+  if (act.type === 'now') return startNow({ ...act.job });
+
   const dup = db.jobs.find((j) => ['pending', 'running'].includes(j.status) && j.stageUuid === act.job.stageUuid);
   if (dup) return say(`Đã có hẹn #${dup.id} cho ${dup.name} — ${dup.label}. Gõ /list để hủy nếu muốn đổi số lượng.`);
 
   const job = { id: db.nextId++, ...act.job, status: 'pending', createdAt: new Date().toISOString() };
-  if (act.type === 'now') job.runAt = new Date().toISOString();
   db.jobs.push(job);
   saveJobs();
   const n = activeWallets().length;
-  if (act.type === 'now') return say(`⚡ Đang mint ${job.name} — ${job.label} x${job.qty} trên ${n} ví...`);
   return say(`⏰ Đã hẹn #${job.id}: ${job.name} — ${job.label} x${job.qty} mỗi ví, ${n} ví, lúc ${fmtTime(job.startTime)} (giờ VN)\nBot chuẩn bị + ký sẵn trước giờ mở. Giữ máy bật. /list để xem hoặc hủy.`);
 }
 
