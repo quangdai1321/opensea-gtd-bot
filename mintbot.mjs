@@ -37,7 +37,7 @@ const LEAD_MS = Number(process.env.MINT_LEAD_SECONDS || 60) * 1000;
 const STALE_MESSAGE_S = 10 * 60;
 const PRICE_POLL_MS = Number(process.env.PRICE_POLL_MINUTES || 2) * 60_000;
 const AUTO_ALERT_PCT = 20; // mint xong tu canh floor lech 20% so voi gia mint
-const ELIG_POLL_MS = Number(process.env.ELIG_POLL_MINUTES || 10) * 60_000;
+const ELIG_POLL_MS = Number(process.env.ELIG_POLL_MINUTES || 5) * 60_000;
 
 // ---------- tien ich ----------
 
@@ -469,6 +469,16 @@ async function eligibilityScan() {
         log('[wl] bo theo doi (da xong)', slug);
       }
       continue;
+    }
+    // Du an doi lich (vd Reeveworld doi Public 20:00 -> 19:34): cap nhat hen + bao
+    for (const s of drop.stages || []) {
+      for (const j of db.jobs.filter((x) => x.status === 'pending' && x.stageUuid === s.uuid)) {
+        if (Date.parse(j.startTime) === Date.parse(s.start_time)) continue;
+        await say(`🔄 ${drop.collection_name} đổi giờ ${s.label}: ${fmtTime(j.startTime)} → ${fmtTime(s.start_time)}. Đã cập nhật hẹn #${j.id}.`);
+        Object.assign(j, { startTime: s.start_time, endTime: s.end_time, price: s.price || j.price });
+      }
+      const info = db.stageInfo[s.uuid];
+      if (info && Date.parse(info.startTime) !== Date.parse(s.start_time)) delete db.reminded[s.uuid]; // nhac lai theo gio moi
     }
     const presale = future.filter((s) => s.stage_type !== 'public_sale');
     const elig = presale.length ? await eligibilityByWallet(slug, wallets) : { ok: false, byWallet: {} };
