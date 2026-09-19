@@ -1,5 +1,13 @@
+# Bi mat: KHONG BAO GIO dua len git
 .env
+.env.*
+*.keystore.json
+*keystore*
+*.key
+*.pem
+secrets*
+
+# Du lieu chay tren may
 drops-state.json
-node_modules/
-wallet.keystore.json
 mint-jobs.json
+node_modules/

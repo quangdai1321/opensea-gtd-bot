@@ -47,7 +47,7 @@ Chỉ cần Node 18+ (máy đang có Node 24), không cần `npm install`.
 
 ## Bước 2a: Cài cho Codex
 
-Tạo file `C:\Users\DaiTQ5\.codex\config.toml` (hiện chưa có) với dòng:
+Tạo file `%USERPROFILE%\.codex\config.toml` (hiện chưa có) với dòng:
 
 ```toml
 notify = ["node", "D:/Bot-Mint/Noti_tele/notify.mjs"]
@@ -58,7 +58,7 @@ Codex tự thêm JSON sự kiện vào cuối lệnh, script chỉ xử lý lo�
 
 ## Bước 2b: Cài cho Claude Code
 
-Thêm khóa `hooks` vào `C:\Users\DaiTQ5\.claude\settings.json`. **Giữ nguyên** các khóa đang có (`permissions`, `model`, ...):
+Thêm khóa `hooks` vào `%USERPROFILE%\.claude\settings.json`. **Giữ nguyên** các khóa đang có (`permissions`, `model`, ...):
 
 ```json
 "hooks": {
