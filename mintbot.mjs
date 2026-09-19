@@ -4,7 +4,7 @@
  *   node mintbot.mjs setup   -> nhap private key + mat khau, luu thanh wallet.keystore.json (da ma hoa)
  *   node mintbot.mjs         -> nhap mat khau, bot chay va nghe lenh Telegram
  *
- * Vi phu: chep thu muc wallets/<ten>/keystore.json (cung mat khau) canh file nay.
+ * Vi phu: node mintbot.mjs addwallet <ten> (tao burner hoac nhap key, cung mat khau), luu o wallets/<ten>/.
  *
  * Tren Telegram (chi nhan lenh tu TELEGRAM_CHAT_ID):
  *   <dan link opensea.io/collection/...>  -> lich cac giai doan + nut hen gio / mint ngay / chay thu
@@ -911,6 +911,36 @@ async function scheduler() {
 
 // ---------- chay ----------
 
+/**
+ * node mintbot.mjs addwallet <ten>  -> them vi phu vao wallets/<ten>/keystore.json, CUNG mat khau voi vi chinh.
+ * Dan private key de nhap vi co san, hoac Enter de tao burner moi.
+ */
+async function addWallet(name) {
+  if (!name || !/^[a-z0-9_-]{1,20}$/i.test(name)) throw new Error('Cach dung: node mintbot.mjs addwallet <ten>  (vd: burner1)');
+  const file = path.join(__dirname, 'wallets', name, 'keystore.json');
+  if (fs.existsSync(file)) throw new Error(`Da co vi ${name}. Chon ten khac.`);
+  if (keystoreFiles(__dirname).length === 0) throw new Error('Chua co vi chinh. Chay truoc: node mintbot.mjs setup');
+
+  const pass = await ask('Mat khau keystore (giong vi chinh): ', true);
+  console.log('Kiem tra mat khau...');
+  if ((await loadWallets(__dirname, pass)).wallets.length === 0) throw new Error('Sai mat khau.');
+
+  const key = await ask('Private key de nhap vi co san (Enter = tao burner moi): ', true);
+  let w;
+  try {
+    w = key ? new ethers.Wallet(key.startsWith('0x') ? key : `0x${key}`) : ethers.Wallet.createRandom();
+  } catch {
+    throw new Error('Private key khong hop le.');
+  }
+  console.log('Dang ma hoa (5-20 giay)...');
+  const json = await ethers.encryptKeystoreJson({ address: w.address, privateKey: w.privateKey }, pass, { scrypt: { N: 1 << 18 } });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, json, { mode: 0o600 });
+  console.log(`\nDa them vi "${name}": ${w.address}`);
+  console.log(key ? '' : 'Burner moi: key chi nam trong file keystore da ma hoa. Chi nap vua du tien mint + gas.');
+  console.log('Khoi dong lai bot de dung vi nay. /wallets tren Telegram de bat/tat.');
+}
+
 async function setup() {
   if (fs.existsSync(KEYSTORE_FILE) && (await ask('Da co wallet.keystore.json. Ghi de? (y/N): ')).toLowerCase() !== 'y') return;
   const key = await ask('Private key cua vi (se khong hien khi go): ', true);
@@ -936,6 +966,7 @@ async function main() {
     if (!process.env[k]) throw new Error(`Thieu ${k} trong .env`);
   }
   if (process.argv[2] === 'setup') return setup();
+  if (process.argv[2] === 'addwallet') return addWallet(process.argv[3]);
 
   if (keystoreFiles(__dirname).length === 0) throw new Error('Chua co vi. Chay truoc: node mintbot.mjs setup');
   const pass = process.env.MINT_PASSWORD || (await ask('Mat khau keystore: ', true));
