@@ -27,6 +27,7 @@ const HTTP_TIMEOUT_MS = 15_000;
 const TICK_MS = 1000;
 const RETRY_WINDOW_MS = 3 * 60_000; // sau gio mo van thu lai trong 3 phut (OpenSea/RPC cham)
 const RECEIPT_TIMEOUT_MS = 5 * 60_000;
+const STALE_MESSAGE_S = 10 * 60;
 
 // chain cua OpenSea -> RPC cong khai + explorer. Doi RPC bang RPC_<CHAIN> trong .env, vd RPC_ROBINHOOD=...
 const CHAINS = {
@@ -385,6 +386,8 @@ async function pollTelegram() {
         offset = u.update_id + 1;
         const chatId = String(u.message?.chat.id ?? u.callback_query?.message?.chat.id ?? '');
         if (chatId !== String(process.env.TELEGRAM_CHAT_ID)) continue; // chi nghe chu bot
+        // Tin don lai luc bot tat qua lau -> bo, khoi tra loi hang loat khi bat lai
+        if (u.message && Date.now() / 1000 - u.message.date > STALE_MESSAGE_S) continue;
         try {
           if (u.callback_query) {
             tg('answerCallbackQuery', { callback_query_id: u.callback_query.id }).catch(() => {});
