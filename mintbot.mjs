@@ -176,7 +176,13 @@ async function tg(method, body, timeoutMs = HTTP_TIMEOUT_MS) {
   return data.result;
 }
 
-/** Gui tin, mang chap chon thi thu lai toi 3 lan */
+// Tin gui loi vi mang (Telegram hay bi nha mang VN bop) -> xep hang, gui lai toi khi duoc, toi da 1 gio
+const outbox = [];
+const OUTBOX_MAX_AGE_MS = 60 * 60_000;
+
+const isNetworkError = (err) => !/^Telegram /.test(err.message) || /Too Many Requests|502|503|504/.test(err.message);
+
+/** Gui tin: thu 3 lan, van loi mang thi dua vao hang cho, khong bao gio mat tin */
 async function say(text, buttons) {
   const body = {
     chat_id: process.env.TELEGRAM_CHAT_ID,
@@ -188,13 +194,40 @@ async function say(text, buttons) {
     try {
       return await tg('sendMessage', body);
     } catch (err) {
-      const network = !/^Telegram /.test(err.message) || /Too Many Requests|502|503|504/.test(err.message);
-      log('[tg]', err.message, network && i < 3 ? `(thu lai ${i})` : '');
-      if (!network || i === 3) return null;
+      if (!isNetworkError(err)) {
+        log('[tg]', err.message);
+        return null;
+      }
+      if (i === 3) {
+        outbox.push({ body, at: Date.now() });
+        log('[tg]', err.message, `-> xep hang gui lai (${outbox.length} tin dang cho)`);
+        return null;
+      }
       await sleep(1500 * i);
     }
   }
   return null;
+}
+
+async function outboxLoop() {
+  for (;;) {
+    await sleep(10_000);
+    while (outbox.length) {
+      const m = outbox[0];
+      if (Date.now() - m.at > OUTBOX_MAX_AGE_MS) {
+        outbox.shift();
+        continue;
+      }
+      const late = Math.round((Date.now() - m.at) / 1000);
+      try {
+        await tg('sendMessage', { ...m.body, text: `${m.body.text}\n\n(gửi trễ ${late}s do mạng tới Telegram chập chờn)` });
+        outbox.shift();
+      } catch (err) {
+        if (!isNetworkError(err)) outbox.shift();
+        break; // mang van loi -> cho vong sau
+      }
+    }
+  }
 }
 
 // Nut bam chi mang ma ngan, du lieu that giu o day (mat khi khoi dong lai -> dan lai link)
@@ -1149,7 +1182,7 @@ async function main() {
   log(`Bot mint dang chay. ${wallets.length} vi: ${wallets.map((w) => `${w.name}=${w.address}`).join(', ')}. ${pending} lan hen. Ctrl+C de dung.`);
   const warn = loaded.failed.length ? `\n⚠️ Không mở được ví: ${loaded.failed.join(', ')}` : '';
   await say(`🤖 Bot mint (contract) đã bật. ${wallets.length} ví, ${activeWallets().length} đang bật, ${pending} lần hẹn.${warn}\nDán link OpenSea để hẹn, /help để xem lệnh.`);
-  await Promise.all([pollTelegram(), scheduler(), priceLoop(), eligibilityLoop(), reminderLoop()]);
+  await Promise.all([pollTelegram(), scheduler(), priceLoop(), eligibilityLoop(), reminderLoop(), outboxLoop()]);
 }
 
 main().catch((err) => {
