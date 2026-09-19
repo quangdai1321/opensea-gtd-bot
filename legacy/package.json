@@ -1,0 +1,19 @@
+{
+  "name": "purr-mint",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "config": "node configure.js",
+    "probe": "node probe.js",
+    "inspect": "node inspect.js",
+    "mint": "node mint.js",
+    "setup": "node setup-wallets.js",
+    "check": "node run-all.js --check",
+    "all": "node run-all.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.2"
+  }
+}

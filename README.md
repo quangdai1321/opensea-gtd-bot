@@ -141,9 +141,9 @@ node drops.mjs check <slug> # xem các giai đoạn của 1 drop + thử quyền
 
 **Quan trọng:** danh sách drop công khai của OpenSea không có drop chưa mở. Dự án nào bạn đã đăng ký GTD/WL thì dán link vào `watch.txt` (mỗi dòng 1 link) để bot đọc lịch của dự án đó.
 
-## mintbot.mjs — Hẹn giờ auto mint qua Telegram
+## mintbot.mjs — Auto mint qua contract SeaDrop (Telegram)
 
-Chạy trên máy (không chạy trên GitHub Actions: lịch trễ và không giữ được private key an toàn).
+Chạy trên máy/VPS (không chạy trên GitHub Actions: lịch trễ và không giữ được private key an toàn).
 
 ```
 npm install                  # 1 lần, cài ethers
@@ -151,6 +151,19 @@ node mintbot.mjs setup       # 1 lần: nhập private key + mật khẩu -> wal
 node mintbot.mjs             # nhập mật khẩu, bot chạy
 ```
 
-Trên Telegram: dán link `opensea.io/collection/...` → bấm **⏰ Auto <giai đoạn>** để hẹn, **⚡ Mint ngay** nếu đang mở.
-`/list` xem/hủy hẹn, `/max 0.01` giới hạn giá + gas mỗi lần, `/bal` số dư. Bot chỉ nghe lệnh từ `TELEGRAM_CHAT_ID`.
-Ví mint chỉ nên giữ đủ tiền mint + gas.
+Ví phụ: chép `wallets/<tên>/keystore.json` (cùng mật khẩu, định dạng của tool cũ) cạnh `mintbot.mjs`.
+
+| Giai đoạn | Cách mint |
+|---|---|
+| Public | Gọi thẳng `SeaDrop.mintPublic`. Đọc giá/giới hạn từ contract, ký sẵn 60s trước, 4s trước giờ mở dò `eth_call` chồng lần (miễn phí), mở là phát ra mọi RPC |
+| GTD / WL (`signed_presale`) | Contract đòi chữ ký OpenSea, chỉ có khi stage mở. Hỏi OpenSea từ 3s trước, **kiểm tra calldata** (đúng SeaDrop, đúng NFT, NFT về đúng ví, đúng số lượng, đúng giá) rồi ký và phát ra mọi RPC |
+
+Trên Telegram: dán link `opensea.io/collection/...` → **⏰ Auto** để hẹn, **⚡ Mint ngay** nếu đang mở, **🧪 Thử** để mô phỏng (không gửi gì).
+`/list` xem/hủy hẹn, `/wallets` bật/tắt ví, `/gas 2` hệ số tip gas, `/max 0.01` giới hạn giá + gas mỗi ví mỗi lần, `/bal` số dư. Bot chỉ nghe lệnh từ `TELEGRAM_CHAT_ID`.
+RPC riêng nhanh hơn: `RPC_ROBINHOOD=url1,url2` trong `.env`. Ví mint chỉ nên giữ đủ tiền mint + gas.
+
+Code: `lib/engine.mjs` (động cơ), `lib/seadrop.mjs` (ABI chuẩn, dịch lỗi, kiểm tra calldata), `lib/chains.mjs` (RPC, gas), `lib/wallets.mjs` (nạp ví).
+
+## legacy/ — Tool mint dòng lệnh cũ
+
+`burst.js`, `race.js`, `snipe.js`, `watch-mint.js`, `run-all.js`... Xem `legacy/README.md` và `legacy/CLI.md`. Chạy trong thư mục `legacy/` với `.env` và `wallets/` riêng (không có trong git).

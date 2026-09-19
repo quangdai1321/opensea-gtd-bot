@@ -2,7 +2,7 @@
 .env
 .env.*
 *.keystore.json
-*keystore*
+*keystore*.json
 *.key
 *.pem
 secrets*
@@ -11,3 +11,9 @@ secrets*
 drops-state.json
 mint-jobs.json
 node_modules/
+
+# Tool cu (legacy/): vi va ket qua mint
+wallets/
+result.json
+_state.json
+!.env.example

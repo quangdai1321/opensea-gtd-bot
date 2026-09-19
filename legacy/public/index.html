@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot-Mint</title>
+<style>
+:root{
+  --ink:#0F1319;
+  --panel:#161B23;
+  --panel-2:#1D242E;
+  --line:#2A3340;
+  --text:#E4E8EE;
+  --muted:#8894A5;
+  --teal:#46B5A0;
+  --amber:#E0A139;
+  --coral:#E0685C;
+  --violet:#7C7BD8;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--ink);color:var(--text);font-family:var(--sans);
+  font-size:14px;line-height:1.55;
+  padding:32px 20px 80px;
+}
+.wrap{max-width:940px;margin:0 auto}
+
+/* ---- header ---- */
+header{display:flex;align-items:baseline;gap:14px;margin-bottom:6px;flex-wrap:wrap}
+h1{
+  font-size:19px;font-weight:600;margin:0;letter-spacing:-0.01em;
+}
+.tag{
+  font-family:var(--mono);font-size:11px;color:var(--muted);
+  border:1px solid var(--line);border-radius:3px;padding:2px 7px;
+}
+.lede{color:var(--muted);margin:0 0 30px;font-size:13px}
+
+/* ---- checklist rail ---- */
+.step{
+  position:relative;
+  border-left:2px solid var(--line);
+  padding:0 0 26px 24px;
+  margin-left:11px;
+}
+.step:last-child{border-left-color:transparent;padding-bottom:0}
+.step::before{
+  content:attr(data-n);
+  position:absolute;left:-12px;top:0;
+  width:22px;height:22px;border-radius:50%;
+  background:var(--ink);border:2px solid var(--line);
+  color:var(--muted);
+  font-family:var(--mono);font-size:11px;
+  display:flex;align-items:center;justify-content:center;
+}
+.step.on{border-left-color:var(--teal)}
+.step.on::before{border-color:var(--teal);color:var(--teal)}
+.step.active::before{border-color:var(--violet);color:var(--violet)}
+.step h2{
+  font-size:13px;font-weight:600;margin:0 0 4px;
+  letter-spacing:0.04em;text-transform:uppercase;
+}
+.step .why{color:var(--muted);font-size:12.5px;margin:0 0 14px}
+.step[hidden]{display:none}
+
+/* ---- controls ---- */
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px}
+.field{display:flex;flex-direction:column;gap:5px;flex:1;min-width:190px}
+label{font-size:11.5px;color:var(--muted);letter-spacing:0.03em}
+input,select{
+  background:var(--panel);border:1px solid var(--line);color:var(--text);
+  border-radius:5px;padding:9px 11px;font-size:13px;font-family:var(--mono);
+  width:100%;
+}
+input:focus,select:focus{outline:2px solid var(--violet);outline-offset:1px;border-color:transparent}
+input::placeholder{color:#4E5A6B}
+select{font-family:var(--sans)}
+button{
+  background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+  border-radius:5px;padding:9px 16px;font-size:13px;font-weight:500;
+  cursor:pointer;font-family:var(--sans);white-space:nowrap;
+}
+button:hover:not(:disabled){border-color:var(--muted)}
+button:focus-visible{outline:2px solid var(--violet);outline-offset:2px}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.go{background:var(--teal);border-color:var(--teal);color:#08120F;font-weight:600}
+button.ghost{background:transparent}
+.hint{font-size:12px;color:var(--muted);margin:8px 0 0}
+
+/* ---- probe result ---- */
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:7px;
+  padding:14px 16px;margin-top:12px;
+}
+.check{display:flex;gap:10px;padding:5px 0;font-size:12.5px;align-items:baseline}
+.check .mk{font-family:var(--mono);width:16px;flex:none}
+.check.y .mk{color:var(--teal)}
+.check.n .mk{color:var(--coral)}
+.check .lb{width:130px;flex:none;color:var(--muted)}
+.check .dt{font-family:var(--mono);word-break:break-all}
+.verdict{
+  margin-top:12px;padding:11px 13px;border-radius:5px;font-size:13px;
+  border:1px solid;
+}
+.verdict.seadrop{border-color:var(--teal);background:rgba(70,181,160,.09)}
+.verdict.calldata{border-color:var(--amber);background:rgba(224,161,57,.09)}
+.verdict.bad{border-color:var(--coral);background:rgba(224,104,92,.09)}
+.verdict b{font-weight:600}
+
+/* ---- wallet table ---- */
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
+th{
+  text-align:left;font-weight:500;color:var(--muted);font-size:11px;
+  letter-spacing:0.04em;text-transform:uppercase;
+  padding:6px 8px;border-bottom:1px solid var(--line);
+}
+td{padding:7px 8px;border-bottom:1px solid rgba(42,51,64,.5);font-family:var(--mono)}
+td.addr{color:var(--muted)}
+.pill{
+  display:inline-block;padding:1px 7px;border-radius:3px;font-size:10.5px;
+  font-family:var(--sans);letter-spacing:.02em;
+}
+.pill.ok{background:rgba(70,181,160,.16);color:var(--teal)}
+.pill.warn{background:rgba(224,161,57,.16);color:var(--amber)}
+.pill.done{background:rgba(124,123,216,.16);color:var(--violet)}
+.pill.bad{background:rgba(224,104,92,.16);color:var(--coral)}
+
+/* ---- arm / hold to mint (signature) ---- */
+.arm{
+  margin-top:16px;border:1px solid var(--line);border-radius:7px;
+  padding:16px;background:var(--panel);
+}
+.arm.ready{border-color:var(--amber)}
+.arm-head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:10px;flex-wrap:wrap}
+.arm-head strong{font-size:13px;font-weight:600}
+.arm-cost{font-family:var(--mono);font-size:12.5px;color:var(--amber)}
+.hold{
+  position:relative;overflow:hidden;width:100%;
+  background:var(--panel-2);border:1px solid var(--amber);color:var(--amber);
+  padding:13px;font-weight:600;font-size:13.5px;border-radius:5px;
+  cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;
+}
+.hold:disabled{border-color:var(--line);color:var(--muted);cursor:not-allowed}
+.hold .fill{
+  position:absolute;inset:0 auto 0 0;width:0%;
+  background:var(--amber);opacity:.22;transition:width .06s linear;
+}
+.hold .lab{position:relative}
+@media (prefers-reduced-motion:reduce){.hold .fill{transition:none}}
+
+/* ---- log ---- */
+.log{
+  margin-top:14px;background:#0B0E13;border:1px solid var(--line);border-radius:7px;
+  font-family:var(--mono);font-size:12px;line-height:1.65;
+  padding:12px 14px;max-height:340px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;
+}
+.log:empty::after{content:"Log se hien o day.";color:#3E4855}
+.log .l-w{color:var(--violet);margin-top:8px;display:block}
+.log .l-e{color:var(--coral)}
+.log .l-s{color:var(--teal)}
+.log .l-m{color:var(--muted)}
+.log a{color:var(--teal)}
+.bar{height:2px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:10px}
+.bar i{display:block;height:100%;background:var(--violet);width:0%;transition:width .3s}
+.note{
+  font-size:12px;color:var(--muted);border-top:1px solid var(--line);
+  margin-top:34px;padding-top:14px;
+}
+.chk{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted)}
+.chk input{width:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Bot-Mint</h1>
+  <span class="tag" id="tagHost">127.0.0.1</span>
+</header>
+<p class="lede">Dan dia chi contract, kiem tra, chay thu, roi mint. Moi thu chay tren may ban.</p>
+
+<!-- 1 -->
+<section class="step active" data-n="1" id="s1">
+  <h2>Contract</h2>
+  <p class="why">Kiem tra contract truoc de biet nen mint theo kieu nao. Buoc nay chi doc, khong ton phi.</p>
+  <div class="row">
+    <div class="field" style="flex:0 0 190px">
+      <label for="chain">Chain</label>
+      <select id="chain"></select>
+    </div>
+    <div class="field" style="flex:2">
+      <label for="contract">Dia chi contract NFT</label>
+      <input id="contract" placeholder="0x..." spellcheck="false" autocomplete="off">
+    </div>
+    <button id="btnProbe" class="go">Kiem tra</button>
+  </div>
+  <div id="probeOut"></div>
+</section>
+
+<!-- 2 -->
+<section class="step" data-n="2" id="s2" hidden>
+  <h2>Cach mint</h2>
+  <p class="why" id="modeWhy"></p>
+  <div id="calldataFields" hidden>
+    <div class="row">
+      <div class="field"><label for="cdContract">Contract nhan giao dich (truong "To")</label><input id="cdContract" placeholder="0x..." spellcheck="false"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="cdData">Calldata (tab "Raw input")</label><input id="cdData" placeholder="0x..." spellcheck="false"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="cdValue">Value moi giao dich</label><input id="cdValue" value="0" spellcheck="false"></div>
+      <div class="field"><label for="cdToken">PAY_TOKEN neu tra bang ERC-20 (bo trong neu khong)</label><input id="cdToken" placeholder="0x..." spellcheck="false"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="cdMinter">Vi da mint tay (de va dia chi nguoi nhan)</label><input id="cdMinter" placeholder="0x... - bo trong neu khong can" spellcheck="false"></div>
+    </div>
+    <p class="hint">Lay tu giao dich mint thu cong tren block explorer.</p>
+  </div>
+  <div class="row">
+    <div class="field" style="flex:0 0 160px">
+      <label for="qty" id="qtyLabel">So luong moi vi</label>
+      <input id="qty" type="number" min="1" value="1">
+    </div>
+    <button id="btnToWallets" class="go">Tiep tuc</button>
+  </div>
+</section>
+
+<!-- 3 -->
+<section class="step" data-n="3" id="s3" hidden>
+  <h2>Vi</h2>
+  <p class="why">Mat khau chi nam trong bo nho cua tien trinh, khong ghi ra dia.</p>
+  <div class="row">
+    <div class="field" style="flex:0 0 260px">
+      <label for="pw">Mat khau keystore</label>
+      <input id="pw" type="password" autocomplete="off">
+    </div>
+    <button id="btnWallets" class="go">Nap vi</button>
+  </div>
+  <div id="walletsOut"></div>
+</section>
+
+<!-- 4 -->
+<section class="step" data-n="4" id="s4" hidden>
+  <h2>Chay</h2>
+  <p class="why">Chay thu truoc. Chay thu mo phong giao dich nhung khong gui gi len chain.</p>
+  <div class="row">
+    <button id="btnDry" class="go">Chay thu</button>
+    <label class="chk"><input type="checkbox" id="skipDone" checked> Bo qua vi da xong</label>
+    <button id="btnReset" class="ghost">Xoa danh dau da xong</button>
+  </div>
+
+  <div class="arm" id="arm">
+    <div class="arm-head">
+      <strong>Mint that</strong>
+      <span class="arm-cost" id="armCost">chay thu truoc da</span>
+    </div>
+    <button class="hold" id="btnMint" disabled>
+      <span class="fill" id="fill"></span>
+      <span class="lab" id="mintLab">Giu 2 giay de mint</span>
+    </button>
+  </div>
+
+  <div class="bar"><i id="prog"></i></div>
+  <div class="log" id="log"></div>
+</section>
+
+<p class="note">Giao dich da gui len chain khong huy duoc. Chay thu khong ton phi, cu chay thu truoc moi lan doi cau hinh.</p>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { mode:null, probe:null, wallets:[], dryPassed:false, running:false };
+
+// ---------- khoi tao ----------
+(async () => {
+  const chains = await (await fetch('/api/chains')).json();
+  const sel = $('chain');
+  for (const c of chains) {
+    const o = document.createElement('option');
+    o.value = c.key; o.textContent = `${c.key} (${c.chainId})`;
+    if (c.key === 'robinhood') o.selected = true;
+    sel.appendChild(o);
+  }
+})();
+
+function setStep(n, on) {
+  const el = $('s'+n);
+  el.hidden = false;
+  el.classList.toggle('on', on);
+  document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+  if (!on) el.classList.add('active');
+}
+
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function logLine(text, cls) {
+  const log = $('log');
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = text + '\n';
+  log.appendChild(span);
+  log.scrollTop = log.scrollHeight;
+}
+
+// ---------- 1. kiem tra contract ----------
+$('btnProbe').onclick = async () => {
+  const contract = $('contract').value.trim();
+  const btn = $('btnProbe');
+  btn.disabled = true; btn.textContent = 'Dang kiem tra...';
+  $('probeOut').innerHTML = '';
+  try {
+    const r = await fetch('/api/probe', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ chain: $('chain').value, contract })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    state.probe = d;
+    renderProbe(d);
+  } catch (e) {
+    $('probeOut').innerHTML = `<div class="verdict bad">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Kiem tra';
+  }
+};
+
+function renderProbe(d) {
+  const rows = d.checks.map(c =>
+    `<div class="check ${c.ok?'y':'n'}"><span class="mk">${c.ok?'✓':'✕'}</span><span class="lb">${esc(c.label)}</span><span class="dt">${esc(c.detail)}</span></div>`
+  ).join('');
+
+  let verdict = '';
+  if (d.mode === 'seadrop') {
+    verdict = `<div class="verdict seadrop"><b>Dung che do SeaDrop.</b> ${esc(d.reason)}</div>`;
+  } else if (d.mode === 'calldata') {
+    verdict = `<div class="verdict calldata"><b>Dung che do calldata.</b> ${esc(d.reason)} Ban can mint tay 1 cai roi copy thong tin giao dich.</div>`;
+  } else {
+    verdict = `<div class="verdict bad">${esc(d.reason)}</div>`;
+  }
+  $('probeOut').innerHTML = `<div class="card">${rows}${verdict}</div>`;
+
+  if (!d.mode) return;
+  state.mode = d.mode;
+  setStep(1, true);
+  setStep(2, false);
+
+  const cd = d.mode === 'calldata';
+  $('calldataFields').hidden = !cd;
+  $('qtyLabel').textContent = cd ? 'So giao dich moi vi' : 'So luong moi vi';
+  $('modeWhy').textContent = cd
+    ? 'Contract khong dung SeaDrop chuan. Mint tay 1 cai tren OpenSea, mo giao dich do tren explorer roi copy cac truong duoi day.'
+    : `Gia ${d.drop.mintPrice} moi cai, gioi han ${d.drop.maxPerWallet} cai moi vi. So luong se tu ha xuong neu vuot gioi han.`;
+  if (!cd && d.drop) $('qty').max = d.drop.maxPerWallet;
+};
+
+$('btnToWallets').onclick = () => { setStep(2, true); setStep(3, false); };
+
+// ---------- 3. nap vi ----------
+$('btnWallets').onclick = async () => {
+  const btn = $('btnWallets');
+  btn.disabled = true; btn.textContent = 'Dang nap...';
+  try {
+    const r = await fetch('/api/wallets', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ chain: $('chain').value, password: $('pw').value })
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    state.wallets = d.wallets;
+    renderWallets(d);
+    if (d.wallets.some(w => !w.error)) { setStep(3, true); setStep(4, false); }
+  } catch (e) {
+    $('walletsOut').innerHTML = `<div class="verdict bad">${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Nap vi';
+  }
+};
+
+function renderWallets(d) {
+  if (!d.wallets.length) {
+    $('walletsOut').innerHTML = `<div class="verdict bad">Khong thay vi nao trong ${esc(d.walletsDir)}. Chay <code>node setup-wallets.js 10</code> truoc.</div>`;
+    return;
+  }
+  const rows = d.wallets.map(w => {
+    if (w.error) return `<tr><td>${esc(w.name)}</td><td colspan="3"><span class="pill bad">${esc(w.error)}</span></td></tr>`;
+    const bal = w.balance === null ? '?' : Number(w.balance).toFixed(6);
+    const pills = [
+      w.encrypted ? '<span class="pill ok">ma hoa</span>' : '<span class="pill warn">key tho</span>',
+      w.done ? '<span class="pill done">da xong</span>' : ''
+    ].join(' ');
+    return `<tr><td>${esc(w.name)}</td><td class="addr">${esc(w.address)}</td><td>${bal}</td><td>${pills}</td></tr>`;
+  }).join('');
+  $('walletsOut').innerHTML =
+    `<table><thead><tr><th>Vi</th><th>Dia chi</th><th>So du</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ---------- 4. chay ----------
+function buildBody(dryRun) {
+  const params = state.mode === 'seadrop'
+    ? { nftContract: state.probe.address }
+    : {
+        contract: $('cdContract').value.trim(),
+        calldata: $('cdData').value.trim(),
+        valueEth: $('cdValue').value.trim() || '0',
+        payToken: $('cdToken').value.trim(),
+        originalMinter: $('cdMinter').value.trim(),
+      };
+  return {
+    chain: $('chain').value,
+    password: $('pw').value,
+    mode: state.mode,
+    dryRun,
+    quantity: parseInt($('qty').value, 10) || 1,
+    skipDone: $('skipDone').checked,
+    params,
+  };
+}
+
+async function run(dryRun) {
+  if (state.running) return;
+  state.running = true;
+  $('log').innerHTML = '';
+  $('prog').style.width = '0%';
+  $('btnDry').disabled = true;
+  $('btnMint').disabled = true;
+
+  let anyError = false, okCount = 0, total = 0;
+
+  try {
+    const res = await fetch('/api/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(buildBody(dryRun))
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream:true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const m = JSON.parse(line);
+        if (m.type === 'start') {
+          total = m.total;
+          logLine(`${m.dryRun ? 'CHAY THU' : 'MINT THAT'} - ${m.total} vi`, 'l-m');
+        } else if (m.type === 'wallet') {
+          logLine(`[${m.index}/${m.total}] ${m.name}  ${m.address}`, 'l-w');
+          $('prog').style.width = ((m.index - 1) / m.total * 100) + '%';
+        } else if (m.type === 'log') {
+          logLine('    ' + m.text);
+        } else if (m.type === 'result') {
+          if (m.result.error) { anyError = true; logLine('    LOI: ' + m.result.error, 'l-e'); }
+          else okCount++;
+        } else if (m.type === 'error') {
+          anyError = true; logLine('LOI: ' + m.message, 'l-e');
+        } else if (m.type === 'done') {
+          $('prog').style.width = '100%';
+          const minted = m.results.reduce((a,r) => a + (r.minted || r.confirmed || 0), 0);
+          logLine(dryRun
+            ? (anyError ? 'Chay thu ket thuc, co loi. Sua roi chay thu lai.' : 'Chay thu dat. Co the mint that.')
+            : `Xong. Tong ${minted} NFT.`, anyError ? 'l-e' : 'l-s');
+        }
+      }
+    }
+  } catch (e) {
+    anyError = true;
+    logLine('LOI: ' + e.message, 'l-e');
+  }
+
+  state.running = false;
+  $('btnDry').disabled = false;
+
+  if (dryRun && !anyError && okCount >= 0) {
+    state.dryPassed = true;
+    $('btnMint').disabled = false;
+    $('arm').classList.add('ready');
+    const q = parseInt($('qty').value,10) || 1;
+    const n = state.wallets.filter(w => !w.error).length;
+    if (state.mode === 'seadrop' && state.probe?.drop) {
+      const cost = (parseFloat(state.probe.drop.mintPrice) * q * n).toFixed(6);
+      $('armCost').textContent = `toi da ~${cost} + gas, ${n} vi x ${q}`;
+    } else {
+      $('armCost').textContent = `${n} vi x ${q}`;
+    }
+  } else if (dryRun) {
+    state.dryPassed = false;
+    $('btnMint').disabled = true;
+    $('arm').classList.remove('ready');
+    $('armCost').textContent = 'chay thu chua dat';
+  }
+}
+
+$('btnDry').onclick = () => run(true);
+
+$('btnReset').onclick = async () => {
+  await fetch('/api/reset-state', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+  logLine('Da xoa danh dau "da xong". Lan chay toi se chay lai tat ca vi.', 'l-m');
+  if ($('pw').value) $('btnWallets').click();
+};
+
+// giu 2 giay de mint
+(() => {
+  const btn = $('btnMint'), fill = $('fill'), lab = $('mintLab');
+  const HOLD = 2000;
+  let t0 = null, raf = null;
+
+  const reset = () => {
+    cancelAnimationFrame(raf); raf = null; t0 = null;
+    fill.style.width = '0%'; lab.textContent = 'Giu 2 giay de mint';
+  };
+  const tick = () => {
+    const p = Math.min((performance.now() - t0) / HOLD, 1);
+    fill.style.width = (p*100) + '%';
+    lab.textContent = p < 1 ? `Giu... ${(HOLD/1000*(1-p)).toFixed(1)}s` : 'Bat dau';
+    if (p >= 1) { reset(); run(false); return; }
+    raf = requestAnimationFrame(tick);
+  };
+  const start = (e) => {
+    if (btn.disabled || state.running) return;
+    e.preventDefault();
+    t0 = performance.now(); raf = requestAnimationFrame(tick);
+  };
+  btn.addEventListener('pointerdown', start);
+  btn.addEventListener('pointerup', reset);
+  btn.addEventListener('pointerleave', reset);
+  btn.addEventListener('pointercancel', reset);
+  btn.addEventListener('keydown', (e) => { if ((e.key===' '||e.key==='Enter') && !e.repeat) start(e); });
+  btn.addEventListener('keyup', reset);
+})();
+</script>
+</body>
+</html>

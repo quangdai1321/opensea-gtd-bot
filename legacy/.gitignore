@@ -1,0 +1,11 @@
+# TUYET DOI khong commit - chua private key
+wallets/
+.env
+.env.bak
+*.key
+keystore.json
+
+node_modules/
+package-lock.json
+*.log
+result.json

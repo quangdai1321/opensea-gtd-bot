@@ -1,16 +1,17 @@
 /**
- * Bot Telegram hen gio auto mint drop OpenSea.
+ * Bot Telegram hen gio auto mint drop OpenSea, goi thang contract SeaDrop (lib/engine.mjs).
  *
  *   node mintbot.mjs setup   -> nhap private key + mat khau, luu thanh wallet.keystore.json (da ma hoa)
  *   node mintbot.mjs         -> nhap mat khau, bot chay va nghe lenh Telegram
  *
- * Tren Telegram (chi nhan lenh tu TELEGRAM_CHAT_ID):
- *   <dan link opensea.io/collection/...>  -> lich cac giai doan + nut hen gio / mint ngay
- *   /list        -> cac lan hen
- *   /max 0.01    -> tu choi mint neu gia + phi gas vuot 0.01 (ETH/coin cua chain); /max off de bo
- *   /bal         -> so du vi tren cac chain
+ * Vi phu: chep thu muc wallets/<ten>/keystore.json (cung mat khau) canh file nay.
  *
- * Den gio mo, bot nho OpenSea dung giao dich mint cho vi, roi ky va gui bang key trong keystore.
+ * Tren Telegram (chi nhan lenh tu TELEGRAM_CHAT_ID):
+ *   <dan link opensea.io/collection/...>  -> lich cac giai doan + nut hen gio / mint ngay / chay thu
+ *   /list      cac lan hen          /wallets  bat/tat vi tham gia mint
+ *   /max 0.01  gioi han moi lan      /gas 2    he so tip gas (cao = uu tien hon)
+ *   /bal       so du
+ *
  * Private key chi nam trong RAM khi bot chay, tren dia chi co ban ma hoa.
  * MINT_PASSWORD trong bien moi truong -> khong hoi mat khau (tien cho tu chay, nhung kem an toan).
  */
@@ -19,33 +20,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
+import { chainCtx } from './lib/chains.mjs';
+import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
+import { mintPublic, mintSigned } from './lib/engine.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KEYSTORE_FILE = path.join(__dirname, 'wallet.keystore.json');
 const JOBS_FILE = path.join(__dirname, 'mint-jobs.json');
 const HTTP_TIMEOUT_MS = 15_000;
-const TICK_MS = 1000;
-const RETRY_WINDOW_MS = 3 * 60_000; // sau gio mo van thu lai trong 3 phut (OpenSea/RPC cham)
-const RECEIPT_TIMEOUT_MS = 5 * 60_000;
+const TICK_MS = 500;
+const PREP_PUBLIC_MS = 60_000; // chuan bi + ky san truoc gio mo public
+const PREP_SIGNED_MS = 20_000;
 const STALE_MESSAGE_S = 10 * 60;
-
-// chain cua OpenSea -> RPC cong khai + explorer. Doi RPC bang RPC_<CHAIN> trong .env, vd RPC_ROBINHOOD=...
-const CHAINS = {
-  ethereum: { rpc: 'https://ethereum-rpc.publicnode.com', explorer: 'https://etherscan.io', coin: 'ETH' },
-  base: { rpc: 'https://mainnet.base.org', explorer: 'https://basescan.org', coin: 'ETH' },
-  robinhood: { rpc: 'https://rpc.mainnet.chain.robinhood.com', explorer: 'https://robinhoodchain.blockscout.com', coin: 'ETH' },
-  arbitrum: { rpc: 'https://arb1.arbitrum.io/rpc', explorer: 'https://arbiscan.io', coin: 'ETH' },
-  optimism: { rpc: 'https://mainnet.optimism.io', explorer: 'https://optimistic.etherscan.io', coin: 'ETH' },
-  zora: { rpc: 'https://rpc.zora.energy', explorer: 'https://explorer.zora.energy', coin: 'ETH' },
-  abstract: { rpc: 'https://api.mainnet.abs.xyz', explorer: 'https://abscan.org', coin: 'ETH' },
-  soneium: { rpc: 'https://rpc.soneium.org', explorer: 'https://soneium.blockscout.com', coin: 'ETH' },
-  unichain: { rpc: 'https://mainnet.unichain.org', explorer: 'https://uniscan.xyz', coin: 'ETH' },
-  shape: { rpc: 'https://mainnet.shape.network', explorer: 'https://shapescan.xyz', coin: 'ETH' },
-  ape_chain: { rpc: 'https://rpc.apechain.com', explorer: 'https://apescan.io', coin: 'APE' },
-  avalanche: { rpc: 'https://api.avax.network/ext/bc/C/rpc', explorer: 'https://snowtrace.io', coin: 'AVAX' },
-  bera_chain: { rpc: 'https://rpc.berachain.com', explorer: 'https://berascan.com', coin: 'BERA' },
-  polygon: { rpc: 'https://polygon-bor-rpc.publicnode.com', explorer: 'https://polygonscan.com', coin: 'POL' },
-};
 
 // ---------- tien ich ----------
 
@@ -72,30 +58,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function fmtTime(iso) {
   return new Date(iso).toLocaleString('vi-VN', {
     timeZone: 'Asia/Ho_Chi_Minh', hour12: false,
-    hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', day: '2-digit', month: '2-digit',
   });
 }
 
 function toSlug(s) {
   const m = s.match(/opensea\.io\/(?:[a-z-]+\/)?collection\/([^/?#\s]+)/i);
   return m ? m[1].toLowerCase() : null;
-}
-
-function chainInfo(chain) {
-  const base = CHAINS[chain];
-  const rpc = process.env[`RPC_${chain.toUpperCase()}`] || base?.rpc;
-  if (!rpc) throw new Error(`Chua co RPC cho chain "${chain}". Them RPC_${chain.toUpperCase()}=... vao .env`);
-  return { rpc, explorer: base?.explorer || '', coin: base?.coin || chain };
-}
-
-const providers = new Map();
-function providerFor(chain) {
-  if (!providers.has(chain)) {
-    const req = new ethers.FetchRequest(chainInfo(chain).rpc);
-    req.timeout = HTTP_TIMEOUT_MS;
-    providers.set(chain, new ethers.JsonRpcProvider(req, undefined, { batchMaxCount: 1 }));
-  }
-  return providers.get(chain);
 }
 
 /** Hoi tu ban phim, hidden = khong hien ky tu go */
@@ -129,11 +98,13 @@ function ask(question, hidden = false) {
 // ---------- luu hen ----------
 
 function readJobs() {
+  let d;
   try {
-    return JSON.parse(fs.readFileSync(JOBS_FILE, 'utf8'));
+    d = JSON.parse(fs.readFileSync(JOBS_FILE, 'utf8'));
   } catch {
-    return { settings: { max: null }, jobs: [], nextId: 1 };
+    d = {};
   }
+  return { jobs: [], nextId: 1, ...d, settings: { max: null, gasBump: 2, disabled: [], ...d.settings } };
 }
 
 let db;
@@ -163,17 +134,17 @@ async function getDrop(slug) {
   return data;
 }
 
-/** OpenSea dung giao dich mint -> { tx } hoac { status, error } */
+/** OpenSea dung giao dich mint co chu ky -> { tx } hoac { status, error } */
 async function buildMint(slug, minter, quantity) {
   const { status, data } = await opensea(`/api/v2/drops/${slug}/mint`, {
     method: 'POST',
-    body: JSON.stringify({ minter, quantity }),
+    body: JSON.stringify({ minter, quantity: Number(quantity) }),
   });
   if (status === 200) {
     const t = data.transaction || data;
     const to = t.target || t.to;
     const calldata = t.calldata || t.data;
-    if (!to || !calldata) return { status, error: `OpenSea tra ve dang la: ${JSON.stringify(data).slice(0, 300)}` };
+    if (!to || !calldata) return { status: 422, error: `OpenSea trả về dạng lạ: ${JSON.stringify(data).slice(0, 200)}` };
     return { tx: { to, data: calldata, value: BigInt(t.value ?? 0) } };
   }
   return { status, error: (data.errors || []).join('; ') || `HTTP ${status}` };
@@ -181,10 +152,8 @@ async function buildMint(slug, minter, quantity) {
 
 // ---------- Telegram ----------
 
-const TG = () => `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
-
 async function tg(method, body, timeoutMs = HTTP_TIMEOUT_MS) {
-  const res = await fetch(`${TG()}/${method}`, {
+  const res = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -213,76 +182,87 @@ function button(text, action) {
   return { text, callback_data: id };
 }
 
-// ---------- mint ----------
+// ---------- vi ----------
 
-let wallet;
+let wallets = [];
+const activeWallets = () => wallets.filter((w) => !db.settings.disabled.includes(w.address));
 
-async function balanceText(chain) {
+async function balanceText(chain, address) {
   try {
-    const bal = await providerFor(chain).getBalance(wallet.address);
-    return `${ethers.formatEther(bal)} ${chainInfo(chain).coin}`;
+    const ctx = chainCtx(chain);
+    return `${ethers.formatEther(await ctx.main.getBalance(address))} ${ctx.coin}`;
   } catch (err) {
-    return `khong doc duoc (${err.shortMessage || err.message})`;
+    return `? (${err.shortMessage || err.message})`;
   }
 }
 
-/** Mint 1 lan hen. Tra ve true neu da xong (thanh cong hoac that bai han), false neu can thu lai */
-async function runJob(job) {
-  const deadline = Math.min(Date.parse(job.endTime || job.startTime) || Infinity, Date.parse(job.startTime) + RETRY_WINDOW_MS);
-  const signer = wallet.connect(providerFor(job.chain));
-  const { explorer, coin } = chainInfo(job.chain);
-  let lastErr = '';
+// ---------- chay 1 lan hen ----------
 
-  for (;;) {
-    const built = await buildMint(job.slug, wallet.address, job.qty).catch((err) => ({ status: 0, error: err.message }));
-    if (built.tx) {
-      try {
-        const { tx } = built;
-        const provider = signer.provider;
-        const [gas, fee] = await Promise.all([
-          provider.estimateGas({ from: wallet.address, ...tx }),
-          provider.getFeeData(),
-        ]);
-        const perGas = fee.maxFeePerGas ?? fee.gasPrice ?? 0n;
-        const cost = tx.value + gas * perGas;
-        if (db.settings.max && cost > ethers.parseEther(db.settings.max)) {
-          await say(`⛔ ${job.name} — ${job.label}: bỏ qua vì tốn ~${ethers.formatEther(cost)} ${coin}, vượt giới hạn /max ${db.settings.max}`);
-          return finish(job, 'over-max');
+const stopFlags = new Set();
+
+/** Hen cu (ban truoc) thieu contract/stageType -> bo sung tu OpenSea */
+async function completeJob(job) {
+  if (job.contract && job.stageType) return;
+  const drop = await getDrop(job.slug);
+  const st = (drop.stages || []).find((s) => s.uuid === job.stageUuid);
+  job.contract = drop.contract_address;
+  job.stageType = st?.stage_type || 'signed_presale';
+  job.price = st?.price || '0';
+  saveJobs();
+}
+
+async function runJob(job, { dry = false } = {}) {
+  await completeJob(job);
+  const ctx = chainCtx(job.chain);
+  job.results ??= {};
+  const targets = activeWallets().filter((w) => !['done', 'sent'].includes(job.results[w.address]?.status));
+  if (targets.length === 0) {
+    await say(`#${job.id}: không có ví nào đang bật. Gõ /wallets`);
+    return dry ? null : finish(job, 'failed');
+  }
+  const isPublic = job.stageType === 'public_sale';
+  const tag = `${job.name} — ${job.label}`;
+  log(dry ? 'thu' : 'mint', `#${job.id}`, job.slug, job.label, `x${job.qty}`, `${targets.length} vi`);
+
+  const results = await Promise.all(targets.map(async (w) => {
+    const opts = {
+      w, nft: job.contract, qty: job.qty, settings: db.settings, dry,
+      shouldStop: () => stopFlags.has(job.id),
+      onEvent: (ev) => {
+        if (ev.type === 'sent' && !dry) {
+          job.results[w.address] = { status: 'sent', hash: ev.hash }; // luu ngay: tat giua chung khong gui lai
+          saveJobs();
         }
-        const sent = await signer.sendTransaction({ ...tx, gasLimit: (gas * 12n) / 10n });
-        job.hash = sent.hash; // luu ngay: tat giua chung thi khong gui lai lan 2
-        saveJobs();
-        log('gui tx', job.slug, sent.hash);
-        await say(`🚀 Đã gửi giao dịch mint ${job.name} x${job.qty}\n${explorer}/tx/${sent.hash}`);
-        const rc = await sent.wait(1, RECEIPT_TIMEOUT_MS);
-        if (rc?.status === 1) {
-          await say(`✅ MINT THÀNH CÔNG: ${job.name} — ${job.label} x${job.qty}\n${explorer}/tx/${sent.hash}\nSố dư còn: ${await balanceText(job.chain)}`);
-          return finish(job, 'done', sent.hash);
-        }
-        await say(`❌ Giao dịch thất bại (revert): ${job.name}\n${explorer}/tx/${sent.hash}`);
-        return finish(job, 'failed', sent.hash);
-      } catch (err) {
-        lastErr = err.shortMessage || err.message;
-        // Het suat / khong du dieu kien -> estimateGas revert, thu lai vo ich
-        if (/insufficient funds|revert|exceeds/i.test(lastErr)) break;
-      }
-    } else {
-      lastErr = built.error;
-      const retry = built.status === 409 || built.status === 429 || built.status === 0 || built.status >= 500;
-      if (!retry) break; // khong co quyen, het suat, thieu tien...
+        say(ev.text);
+      },
+    };
+    let r;
+    try {
+      r = isPublic
+        ? await mintPublic(ctx, opts)
+        : await mintSigned(ctx, { ...opts, price: job.price, startTime: job.startTime, endTime: job.endTime, buildMint: (m, q) => buildMint(job.slug, m, q) });
+    } catch (err) {
+      r = { status: 'failed', note: err.shortMessage || err.message };
     }
-    if (Date.now() >= deadline) break;
-    await sleep(TICK_MS);
-  }
+    if (!dry) {
+      job.results[w.address] = { ...r, at: new Date().toISOString() };
+      saveJobs();
+    }
+    return { w, r };
+  }));
 
-  await say(`❌ Không mint được ${job.name} — ${job.label}\nLý do: ${lastErr || 'hết thời gian thử'}\nSố dư: ${await balanceText(job.chain)}`);
-  return finish(job, 'failed');
+  const icon = { done: '✅', failed: '❌', skipped: '⏭', dry: '🧪' };
+  const lines = results.map(({ w, r }) => `${icon[r.status] || '•'} ${w.name} ${short(w.address)}: ${r.note || ''}${r.hash ? `\n   ${ctx.txUrl(r.hash)}` : ''}`);
+  const head = dry ? `🧪 CHẠY THỬ (không gửi gì): ${tag} x${job.qty}` : `${results.some((x) => x.r.status === 'done') ? '✅ XONG' : '❌ KHÔNG MINT ĐƯỢC'}: ${tag} x${job.qty}`;
+  await say(`${head}\n${isPublic ? 'Gọi thẳng contract (mintPublic)' : 'Chữ ký OpenSea → contract (mintSigned)'}\n\n${lines.join('\n')}`);
+  if (dry) return null;
+  return finish(job, results.some((x) => x.r.status === 'done') ? 'done' : 'failed');
 }
 
-function finish(job, status, hash) {
+function finish(job, status) {
   job.status = status;
-  if (hash) job.hash = hash;
   job.doneAt = new Date().toISOString();
+  stopFlags.delete(job.id);
   saveJobs();
   return true;
 }
@@ -292,8 +272,14 @@ function finish(job, status, hash) {
 async function showDrop(slug) {
   const drop = await getDrop(slug);
   const now = Date.now();
-  const { coin } = chainInfo(drop.chain);
-  const lines = [`${drop.collection_name} — chain ${drop.chain}`, `Ví ${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}: ${await balanceText(drop.chain)}`, ''];
+  const ctx = chainCtx(drop.chain);
+  const act = activeWallets();
+  const bals = await Promise.all(act.map(async (w) => `${w.name} ${short(w.address)}: ${await balanceText(drop.chain, w.address)}`));
+  const lines = [
+    `${drop.collection_name} — chain ${drop.chain}`,
+    `Contract ${short(drop.contract_address)} (${drop.drop_type})`,
+    `Ví đang bật (${act.length}):`, ...bals.map((b) => `  ${b}`), '',
+  ];
   const rows = [];
 
   const stages = [...(drop.stages || [])].sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time));
@@ -301,21 +287,24 @@ async function showDrop(slug) {
     const start = Date.parse(s.start_time);
     const end = Date.parse(s.end_time);
     const state = now >= end ? '⚫ đã đóng' : now >= start ? '🟢 đang mở' : '🕒 sắp mở';
-    const price = ethers.formatEther(BigInt(s.price || '0'));
-    lines.push(`${state} ${s.label}: ${fmtTime(s.start_time)} → ${fmtTime(s.end_time)} | ${price} ${coin} | tối đa ${s.max_per_wallet}/ví`);
+    const kind = s.stage_type === 'public_sale' ? 'contract' : 'chữ ký OpenSea';
+    lines.push(`${state} ${s.label} [${kind}]: ${fmtTime(s.start_time)} → ${fmtTime(s.end_time)} | ${ethers.formatEther(BigInt(s.price || '0'))} ${ctx.coin} | tối đa ${s.max_per_wallet}/ví`);
     if (now >= end) continue;
 
-    const job = { slug, name: drop.collection_name, chain: drop.chain, label: s.label, stageUuid: s.uuid, startTime: s.start_time, endTime: s.end_time };
+    const job = {
+      slug, name: drop.collection_name, chain: drop.chain, contract: drop.contract_address,
+      label: s.label, stageUuid: s.uuid, stageType: s.stage_type, price: s.price || '0',
+      startTime: s.start_time, endTime: s.end_time,
+    };
     const max = Math.max(1, Number(s.max_per_wallet) || 1);
     const qtys = [...new Set([1, Math.min(max, 10)])];
-    if (now >= start) {
-      rows.push(qtys.map((q) => button(`⚡ Mint ngay ${s.label} x${q}`, { type: 'now', job: { ...job, qty: q } })));
-    } else {
-      rows.push(qtys.map((q) => button(`⏰ Auto ${s.label} x${q}`, { type: 'schedule', job: { ...job, qty: q } })));
-    }
+    const verb = now >= start ? '⚡ Mint ngay' : '⏰ Auto';
+    rows.push([
+      ...qtys.map((q) => button(`${verb} ${s.label} x${q}`, { type: now >= start ? 'now' : 'schedule', job: { ...job, qty: q } })),
+      button('🧪 Thử', { type: 'dry', job: { ...job, qty: 1 } }),
+    ]);
   }
-  lines.push('', drop.opensea_url);
-  if (db.settings.max) lines.push(`Giới hạn /max: ${db.settings.max} ${coin}`);
+  lines.push('', drop.opensea_url, `Giới hạn /max: ${db.settings.max ?? 'không'} | tip gas /gas: x${db.settings.gasBump}`);
   await say(lines.join('\n'), rows);
 }
 
@@ -324,22 +313,42 @@ async function listJobs() {
   if (pending.length === 0) return say('Chưa có lần hẹn nào. Dán link OpenSea để hẹn.');
   const rows = pending.map((j) => [button(`❌ Hủy #${j.id} ${j.name} ${j.label}`, { type: 'cancel', id: j.id })]);
   const text = pending.map((j) => `#${j.id} ${j.name} — ${j.label} x${j.qty} lúc ${fmtTime(j.startTime)} (${j.status})`).join('\n');
-  return say(text, rows);
+  return say(`${text}\n\nVí tham gia: ${activeWallets().length}/${wallets.length}`, rows);
+}
+
+async function showWallets() {
+  const rows = wallets.map((w) => {
+    const on = !db.settings.disabled.includes(w.address);
+    return [button(`${on ? '🟢' : '⚪'} ${w.name} ${short(w.address)}`, { type: 'toggle', address: w.address })];
+  });
+  return say(`Bấm để bật/tắt ví tham gia mint (🟢 = bật):`, rows);
 }
 
 async function showBalances() {
-  const chains = [...new Set(['ethereum', 'base', 'robinhood', ...db.jobs.filter((j) => j.status === 'pending').map((j) => j.chain)])];
-  const lines = await Promise.all(chains.map(async (c) => `${c}: ${await balanceText(c)}`));
-  return say(`Ví ${wallet.address}\n${lines.join('\n')}`);
+  const chains = [...new Set(['robinhood', 'base', 'ethereum', ...db.jobs.filter((j) => j.status === 'pending').map((j) => j.chain)])];
+  const out = [];
+  for (const w of activeWallets()) {
+    const b = await Promise.all(chains.map(async (c) => `${c}: ${await balanceText(c, w.address)}`));
+    out.push(`${w.name} ${w.address}\n  ${b.join('\n  ')}`);
+  }
+  return say(out.join('\n\n') || 'Không có ví nào đang bật.');
 }
 
 async function onText(text) {
   const [cmd, arg] = text.trim().split(/\s+/);
   if (cmd === '/start' || cmd === '/help') {
-    return say('Dán link OpenSea (opensea.io/collection/...) để xem lịch và hẹn auto mint.\n/list — các lần hẹn\n/max 0.01 — giới hạn giá + gas mỗi lần mint (/max off để bỏ)\n/bal — số dư ví');
+    return say([
+      'Dán link OpenSea (opensea.io/collection/...) để xem lịch, hẹn auto mint, hoặc 🧪 chạy thử.',
+      '/list — các lần hẹn',
+      '/wallets — bật/tắt ví tham gia',
+      '/max 0.01 — giới hạn giá + gas mỗi ví mỗi lần (/max off để bỏ)',
+      '/gas 2 — hệ số tip gas, cao = được xếp trước (mặc định 2)',
+      '/bal — số dư',
+    ].join('\n'));
   }
   if (cmd === '/list') return listJobs();
   if (cmd === '/bal') return showBalances();
+  if (cmd === '/wallets') return showWallets();
   if (cmd === '/max') {
     if (!arg) return say(`Giới hạn hiện tại: ${db.settings.max ?? 'không giới hạn'}`);
     if (arg === 'off') db.settings.max = null;
@@ -347,6 +356,14 @@ async function onText(text) {
     else return say('Ví dụ: /max 0.01 hoặc /max off');
     saveJobs();
     return say(`Đã đặt giới hạn: ${db.settings.max ?? 'không giới hạn'}`);
+  }
+  if (cmd === '/gas') {
+    const v = Number(arg);
+    if (!arg) return say(`Tip gas hiện tại: x${db.settings.gasBump}`);
+    if (!(v >= 1 && v <= 20)) return say('Ví dụ: /gas 2 (từ 1 đến 20)');
+    db.settings.gasBump = v;
+    saveJobs();
+    return say(`Đã đặt tip gas x${v}`);
   }
   const slug = toSlug(text);
   if (slug) return showDrop(slug);
@@ -357,22 +374,37 @@ async function onButton(id) {
   const act = actions.get(id);
   if (!act) return say('Nút này đã cũ (bot vừa khởi động lại). Dán lại link để có nút mới.');
 
+  if (act.type === 'toggle') {
+    const d = db.settings.disabled;
+    const i = d.indexOf(act.address);
+    if (i >= 0) d.splice(i, 1); else d.push(act.address);
+    saveJobs();
+    return showWallets();
+  }
+
   if (act.type === 'cancel') {
     const job = db.jobs.find((j) => j.id === act.id);
-    if (!job || job.status !== 'pending') return say(`#${act.id} không còn để hủy.`);
-    finish(job, 'cancelled');
+    if (!job || !['pending', 'running'].includes(job.status)) return say(`#${act.id} không còn để hủy.`);
+    if (job.status === 'running') stopFlags.add(job.id);
+    else finish(job, 'cancelled');
     return say(`Đã hủy #${job.id} ${job.name} — ${job.label}`);
   }
 
-  const dup = db.jobs.find((j) => j.status === 'pending' && j.stageUuid === act.job.stageUuid);
+  if (act.type === 'dry') {
+    await say(`🧪 Đang chạy thử ${act.job.name} — ${act.job.label}...`);
+    return runJob({ id: 0, ...act.job }, { dry: true });
+  }
+
+  const dup = db.jobs.find((j) => ['pending', 'running'].includes(j.status) && j.stageUuid === act.job.stageUuid);
   if (dup) return say(`Đã có hẹn #${dup.id} cho ${dup.name} — ${dup.label}. Gõ /list để hủy nếu muốn đổi số lượng.`);
 
   const job = { id: db.nextId++, ...act.job, status: 'pending', createdAt: new Date().toISOString() };
-  if (act.type === 'now') job.startTime = new Date().toISOString();
+  if (act.type === 'now') job.runAt = new Date().toISOString();
   db.jobs.push(job);
   saveJobs();
-  if (act.type === 'now') return say(`⚡ Đang mint ${job.name} — ${job.label} x${job.qty}...`);
-  return say(`⏰ Đã hẹn #${job.id}: auto mint ${job.name} — ${job.label} x${job.qty} lúc ${fmtTime(job.startTime)} (giờ VN)\nGiữ máy bật và bot chạy tới lúc đó. /list để xem hoặc hủy.`);
+  const n = activeWallets().length;
+  if (act.type === 'now') return say(`⚡ Đang mint ${job.name} — ${job.label} x${job.qty} trên ${n} ví...`);
+  return say(`⏰ Đã hẹn #${job.id}: ${job.name} — ${job.label} x${job.qty} mỗi ví, ${n} ví, lúc ${fmtTime(job.startTime)} (giờ VN)\nBot chuẩn bị + ký sẵn trước giờ mở. Giữ máy bật. /list để xem hoặc hủy.`);
 }
 
 // ---------- vong lap ----------
@@ -388,17 +420,20 @@ async function pollTelegram() {
         if (chatId !== String(process.env.TELEGRAM_CHAT_ID)) continue; // chi nghe chu bot
         // Tin don lai luc bot tat qua lau -> bo, khoi tra loi hang loat khi bat lai
         if (u.message && Date.now() / 1000 - u.message.date > STALE_MESSAGE_S) continue;
-        try {
-          if (u.callback_query) {
-            tg('answerCallbackQuery', { callback_query_id: u.callback_query.id }).catch(() => {});
-            await onButton(u.callback_query.data);
-          } else if (u.message?.text) {
-            await onText(u.message.text);
+        // Khong await: 1 lenh cham (chay thu, mint ngay) khong duoc chan cac lenh khac
+        (async () => {
+          try {
+            if (u.callback_query) {
+              tg('answerCallbackQuery', { callback_query_id: u.callback_query.id }).catch(() => {});
+              await onButton(u.callback_query.data);
+            } else if (u.message?.text) {
+              await onText(u.message.text);
+            }
+          } catch (err) {
+            log('[lenh]', err.message);
+            await say(`Lỗi: ${err.message}`);
           }
-        } catch (err) {
-          log('[lenh]', err.message);
-          await say(`Lỗi: ${err.message}`);
-        }
+        })();
       }
     } catch (err) {
       log('[tg]', err.message);
@@ -411,10 +446,12 @@ async function scheduler() {
   for (;;) {
     const now = Date.now();
     for (const job of db.jobs) {
-      if (job.status !== 'pending' || Date.parse(job.startTime) > now) continue;
+      if (job.status !== 'pending') continue;
+      const lead = job.stageType === 'public_sale' ? PREP_PUBLIC_MS : PREP_SIGNED_MS;
+      const at = job.runAt ? Date.parse(job.runAt) : Date.parse(job.startTime) - lead;
+      if (at > now) continue;
       job.status = 'running';
       saveJobs();
-      log('mint', `#${job.id}`, job.slug, job.label, `x${job.qty}`);
       runJob(job).catch(async (err) => {
         log('[mint]', err.message);
         await say(`❌ Lỗi khi mint #${job.id} ${job.name}: ${err.message}`);
@@ -428,6 +465,7 @@ async function scheduler() {
 // ---------- chay ----------
 
 async function setup() {
+  if (fs.existsSync(KEYSTORE_FILE) && (await ask('Da co wallet.keystore.json. Ghi de? (y/N): ')).toLowerCase() !== 'y') return;
   const key = await ask('Private key cua vi (se khong hien khi go): ', true);
   let w;
   try {
@@ -443,9 +481,6 @@ async function setup() {
   const json = await ethers.encryptKeystoreJson({ address: w.address, privateKey: w.privateKey }, pass, { scrypt: { N: 1 << 18 } });
   fs.writeFileSync(KEYSTORE_FILE, json, { mode: 0o600 });
   console.log(`Da luu ${KEYSTORE_FILE}\nDia chi vi: ${w.address}`);
-  if (process.env.WATCH_WALLET && process.env.WATCH_WALLET.toLowerCase() !== w.address.toLowerCase()) {
-    console.log(`CANH BAO: khac WATCH_WALLET (${process.env.WATCH_WALLET}) trong .env`);
-  }
 }
 
 async function main() {
@@ -455,28 +490,29 @@ async function main() {
   }
   if (process.argv[2] === 'setup') return setup();
 
-  if (!fs.existsSync(KEYSTORE_FILE)) throw new Error('Chua co keystore. Chay truoc: node mintbot.mjs setup');
+  if (keystoreFiles(__dirname).length === 0) throw new Error('Chua co vi. Chay truoc: node mintbot.mjs setup');
   const pass = process.env.MINT_PASSWORD || (await ask('Mat khau keystore: ', true));
   console.log('Dang giai ma keystore...');
-  try {
-    wallet = await ethers.Wallet.fromEncryptedJson(fs.readFileSync(KEYSTORE_FILE, 'utf8'), pass);
-  } catch {
-    throw new Error('Sai mat khau.');
-  }
+  const loaded = await loadWallets(__dirname, pass);
+  if (loaded.wallets.length === 0) throw new Error('Sai mat khau.');
+  wallets = loaded.wallets;
+  if (loaded.failed.length) console.log(`CANH BAO: khong mo duoc vi ${loaded.failed.join(', ')} (khac mat khau?)`);
 
   db = readJobs();
-  // Lan truoc bi tat giua chung -> cho chay lai neu con trong thoi gian mo
-  // Da gui tx roi thi khong mint lai, chi bao de tu kiem tra
+  // Da gui tx roi thi khong mint lai vi do (runJob bo qua vi 'sent'), cac vi khac chay tiep
   for (const j of db.jobs) {
     if (j.status !== 'running') continue;
-    j.status = j.hash ? 'unknown' : 'pending';
-    if (j.hash) await say(`⚠️ Bot bị tắt khi đang chờ giao dịch #${j.id} ${j.name}. Kiểm tra: ${chainInfo(j.chain).explorer}/tx/${j.hash}`);
+    j.status = 'pending';
+    for (const [addr, r] of Object.entries(j.results || {})) {
+      if (r.status === 'sent') await say(`⚠️ Bot bị tắt khi đang chờ giao dịch #${j.id} ${j.name} (${short(addr)}). Kiểm tra: ${chainCtx(j.chain).txUrl(r.hash)}`);
+    }
   }
   saveJobs();
 
   const pending = db.jobs.filter((j) => j.status === 'pending').length;
-  log(`Bot mint dang chay. Vi ${wallet.address}, ${pending} lan hen. Ctrl+C de dung.`);
-  await say(`🤖 Bot mint đã bật. Ví ${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}, ${pending} lần hẹn.\nDán link OpenSea để hẹn auto mint, /help để xem lệnh.`);
+  log(`Bot mint dang chay. ${wallets.length} vi: ${wallets.map((w) => `${w.name}=${w.address}`).join(', ')}. ${pending} lan hen. Ctrl+C de dung.`);
+  const warn = loaded.failed.length ? `\n⚠️ Không mở được ví: ${loaded.failed.join(', ')}` : '';
+  await say(`🤖 Bot mint (contract) đã bật. ${wallets.length} ví, ${activeWallets().length} đang bật, ${pending} lần hẹn.${warn}\nDán link OpenSea để hẹn, /help để xem lệnh.`);
   await Promise.all([pollTelegram(), scheduler()]);
 }
 
