@@ -24,6 +24,7 @@ import { chainCtx } from './lib/chains.mjs';
 import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
 import { mintPublic, mintSigned } from './lib/engine.mjs';
 import { fetchStats, statsText, parseAlert, alertLabel, evalAlert } from './lib/prices.mjs';
+import { hasAuth, jwtExpiry, fetchEligibility, eligIcon } from './lib/eligibility.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KEYSTORE_FILE = path.join(__dirname, 'wallet.keystore.json');
@@ -35,6 +36,7 @@ const PREP_SIGNED_MS = 20_000;
 const STALE_MESSAGE_S = 10 * 60;
 const PRICE_POLL_MS = Number(process.env.PRICE_POLL_MINUTES || 2) * 60_000;
 const AUTO_ALERT_PCT = 20; // mint xong tu canh floor lech 20% so voi gia mint
+const ELIG_POLL_MS = Number(process.env.ELIG_POLL_MINUTES || 10) * 60_000;
 
 // ---------- tien ich ----------
 
@@ -112,7 +114,7 @@ function readJobs() {
   } catch {
     d = {};
   }
-  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, ...d, settings: { max: null, gasBump: 2, disabled: [], ...d.settings } };
+  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, watch: [], eligSeen: {}, ...d, settings: { max: null, gasBump: 2, disabled: [], ...d.settings } };
 }
 
 let db;
@@ -300,6 +302,7 @@ async function showDrop(slug) {
     `Ví đang bật (${act.length}):`, ...bals.map((b) => `  ${b}`), '',
   ];
   const rows = [];
+  const elig = await eligibilityByWallet(slug, act);
 
   const stages = [...(drop.stages || [])].sort((a, b) => Date.parse(a.start_time) - Date.parse(b.start_time));
   for (const s of stages) {
@@ -308,6 +311,10 @@ async function showDrop(slug) {
     const state = now >= end ? '⚫ đã đóng' : now >= start ? '🟢 đang mở' : '🕒 sắp mở';
     const kind = s.stage_type === 'public_sale' ? 'contract' : 'chữ ký OpenSea';
     lines.push(`${state} ${s.label} [${kind}]: ${fmtTime(s.start_time)} → ${fmtTime(s.end_time)} | ${ethers.formatEther(BigInt(s.price || '0'))} ${ctx.coin} | tối đa ${s.max_per_wallet}/ví`);
+    if (elig.ok && s.stage_type !== 'public_sale') {
+      const parts = act.map((w) => `${act.length > 1 ? w.name : 'Ví'}:${eligIcon(elig.byWallet[w.address]?.get(s.uuid)) || ' ❔'}`);
+      lines.push(`    ${parts.join(' | ')}`);
+    }
     if (now >= end) continue;
 
     const job = {
@@ -323,8 +330,103 @@ async function showDrop(slug) {
       button('🧪 Thử', { type: 'dry', job: { ...job, qty: 1 } }),
     ]);
   }
+  if (!elig.ok) lines.push('', `Quyền GTD/WL: ${elig.note}`);
   lines.push('', drop.opensea_url, `Giới hạn /max: ${db.settings.max ?? 'không'} | tip gas /gas: x${db.settings.gasBump}`);
   await say(lines.join('\n'), rows);
+}
+
+// ---------- quyen GTD/WL truoc gio mo (token dang nhap OpenSea cua ban) ----------
+
+let authBroken = false; // token hong -> bao 1 lan, ngung hoi cho toi khi khoi dong lai
+
+/** -> { ok, note, byWallet: { address: Map<uuid, elig> } } */
+async function eligibilityByWallet(slug, list) {
+  if (!hasAuth()) return { ok: false, note: 'chưa có OPENSEA_JWT trong .env (chỉ biết khi stage mở)', byWallet: {} };
+  if (authBroken) return { ok: false, note: 'token OpenSea hết hạn, lấy token mới rồi khởi động lại bot', byWallet: {} };
+  const byWallet = {};
+  try {
+    for (const w of list) byWallet[w.address] = (await fetchEligibility(slug, w.address)).stages;
+    return { ok: true, byWallet };
+  } catch (err) {
+    if (err.auth && !authBroken) {
+      authBroken = true;
+      await say(`⚠️ ${err.message}\nVào opensea.io → F12 → Network → graphql → chép lại authorization vào OPENSEA_JWT trong .env, rồi khởi động lại bot.`);
+    }
+    return { ok: false, note: err.message, byWallet: {} };
+  }
+}
+
+function watchSlugs() {
+  let fromFile = [];
+  try {
+    fromFile = fs.readFileSync(path.join(__dirname, 'watch.txt'), 'utf8').split(/\r?\n/)
+      .map((l) => argSlug(l.replace(/#.*/, '').trim())).filter(Boolean);
+  } catch { /* khong co file */ }
+  return [...new Set([...db.watch, ...fromFile])];
+}
+
+/** Hoi quyen cua moi vi o moi du an dang theo doi, bao khi co quyen MOI */
+async function eligibilityScan() {
+  if (!hasAuth() || authBroken) return;
+  const exp = jwtExpiry();
+  if (exp && exp - Date.now() < 24 * 3600_000 && !db.eligSeen._expWarned) {
+    db.eligSeen._expWarned = exp;
+    await say(`⏳ Token OpenSea hết hạn lúc ${fmtTime(new Date(exp).toISOString())}. Lấy token mới trước đó để không lỡ báo WL.`);
+  }
+  for (const slug of watchSlugs()) {
+    let drop;
+    try {
+      drop = await getDrop(slug);
+    } catch (err) {
+      log('[wl]', slug, err.message);
+      continue;
+    }
+    const open = (drop.stages || []).filter((s) => s.stage_type !== 'public_sale' && Date.parse(s.end_time) > Date.now());
+    if (open.length === 0) continue;
+    const elig = await eligibilityByWallet(slug, wallets);
+    if (!elig.ok) return;
+    for (const w of wallets) {
+      for (const s of open) {
+        const e = elig.byWallet[w.address]?.get(s.uuid);
+        if (!e || e.status === 'UNKNOWN') continue;
+        const key = `${slug}:${s.uuid}:${w.address}`;
+        const before = db.eligSeen[key];
+        db.eligSeen[key] = e.status;
+        if (e.status !== 'ELIGIBLE' || before === 'ELIGIBLE') continue;
+        const job = {
+          slug, name: drop.collection_name, chain: drop.chain, contract: drop.contract_address,
+          label: s.label, stageUuid: s.uuid, stageType: s.stage_type, price: s.price || '0',
+          startTime: s.start_time, endTime: s.end_time,
+        };
+        const q = Math.max(1, Number(e.maxMintable || s.max_per_wallet) || 1);
+        await say(
+          `🎉 ${w.name} ${short(w.address)} CÓ ${s.label} ở ${drop.collection_name}!\n` +
+            `Mở ${fmtTime(s.start_time)} (giờ VN) | ${ethers.formatEther(BigInt(s.price || '0'))} ${chainCtx(drop.chain).coin} | được mint ${q}\n${drop.opensea_url}`,
+          [[button(`⏰ Hẹn auto mint x${q}`, { type: 'schedule', job: { ...job, qty: q } })]],
+        );
+      }
+    }
+    saveJobs();
+  }
+}
+
+async function eligibilityLoop() {
+  for (;;) {
+    try {
+      await eligibilityScan();
+    } catch (err) {
+      log('[wl]', err.message);
+    }
+    await sleep(ELIG_POLL_MS);
+  }
+}
+
+async function listWatch() {
+  const slugs = watchSlugs();
+  if (slugs.length === 0) return say('Chưa theo dõi dự án nào. /watch <link OpenSea>');
+  const rows = db.watch.map((s) => [button(`❌ Bỏ ${s}`, { type: 'unwatch', slug: s })]);
+  const note = hasAuth() ? `Kiểm tra quyền GTD/WL mỗi ${ELIG_POLL_MS / 60_000} phút.` : '⚠️ Chưa có OPENSEA_JWT: chưa báo được quyền GTD/WL trước giờ mở.';
+  return say(`Đang theo dõi:\n${slugs.map((s) => `• ${s}${db.watch.includes(s) ? '' : ' (watch.txt)'}`).join('\n')}\n\n${note}`, rows);
 }
 
 async function listJobs() {
@@ -367,6 +469,9 @@ async function onText(text) {
       '/price reeveworld — giá sàn, volume, so với giá mint',
       '/alert reeveworld < 0.001 — báo khi floor xuống (> để báo khi lên, 15% để báo mỗi lần lệch 15%)',
       '/alerts — xem / xóa cảnh báo giá',
+      '',
+      '/watch <link> — theo dõi dự án, báo ngay khi ví có GTD/WL (cần OPENSEA_JWT)',
+      '/watch — danh sách đang theo dõi',
     ].join('\n'));
   }
   if (cmd === '/price') {
@@ -389,6 +494,15 @@ async function onText(text) {
     return addAlert(slug, rule);
   }
   if (cmd === '/alerts') return listAlerts();
+  if (cmd === '/watch') {
+    const slug = argSlug(arg);
+    if (!slug) return listWatch();
+    await getDrop(slug); // bao loi ngay neu khong phai drop
+    if (!db.watch.includes(slug)) db.watch.push(slug);
+    saveJobs();
+    await say(`👀 Đã theo dõi ${slug}. Bot báo ngay khi ví có GTD/WL.`);
+    return eligibilityScan();
+  }
   if (cmd === '/list') return listJobs();
   if (cmd === '/bal') return showBalances();
   if (cmd === '/wallets') return showWallets();
@@ -454,6 +568,11 @@ async function onButton(id) {
   if (!act) return say('Nút này đã cũ (bot vừa khởi động lại). Dán lại link để có nút mới.');
 
   if (act.type === 'alert') return addAlert(act.slug, act.rule);
+  if (act.type === 'unwatch') {
+    db.watch = db.watch.filter((s) => s !== act.slug);
+    saveJobs();
+    return say(`Đã bỏ theo dõi ${act.slug}`);
+  }
   if (act.type === 'unalert') {
     db.alerts = db.alerts.filter((a) => a.id !== act.id);
     saveJobs();
@@ -599,7 +718,7 @@ async function main() {
   log(`Bot mint dang chay. ${wallets.length} vi: ${wallets.map((w) => `${w.name}=${w.address}`).join(', ')}. ${pending} lan hen. Ctrl+C de dung.`);
   const warn = loaded.failed.length ? `\n⚠️ Không mở được ví: ${loaded.failed.join(', ')}` : '';
   await say(`🤖 Bot mint (contract) đã bật. ${wallets.length} ví, ${activeWallets().length} đang bật, ${pending} lần hẹn.${warn}\nDán link OpenSea để hẹn, /help để xem lệnh.`);
-  await Promise.all([pollTelegram(), scheduler(), priceLoop()]);
+  await Promise.all([pollTelegram(), scheduler(), priceLoop(), eligibilityLoop()]);
 }
 
 main().catch((err) => {
