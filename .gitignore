@@ -1,2 +1,5 @@
 .env
 drops-state.json
+node_modules/
+wallet.keystore.json
+mint-jobs.json

@@ -140,3 +140,17 @@ node drops.mjs check <slug> # xem các giai đoạn của 1 drop + thử quyền
 Đã nhắc / đã kiểm tra lưu ở `drops-state.json` để không báo trùng.
 
 **Quan trọng:** danh sách drop công khai của OpenSea không có drop chưa mở. Dự án nào bạn đã đăng ký GTD/WL thì dán link vào `watch.txt` (mỗi dòng 1 link) để bot đọc lịch của dự án đó.
+
+## mintbot.mjs — Hẹn giờ auto mint qua Telegram
+
+Chạy trên máy (không chạy trên GitHub Actions: lịch trễ và không giữ được private key an toàn).
+
+```
+npm install                  # 1 lần, cài ethers
+node mintbot.mjs setup       # 1 lần: nhập private key + mật khẩu -> wallet.keystore.json (mã hóa)
+node mintbot.mjs             # nhập mật khẩu, bot chạy
+```
+
+Trên Telegram: dán link `opensea.io/collection/...` → bấm **⏰ Auto <giai đoạn>** để hẹn, **⚡ Mint ngay** nếu đang mở.
+`/list` xem/hủy hẹn, `/max 0.01` giới hạn giá + gas mỗi lần, `/bal` số dư. Bot chỉ nghe lệnh từ `TELEGRAM_CHAT_ID`.
+Ví mint chỉ nên giữ đủ tiền mint + gas.

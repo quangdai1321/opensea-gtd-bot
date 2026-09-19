@@ -1,0 +1,12 @@
+{
+  "name": "opensea-gtd-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "drops": "node drops.mjs",
+    "mint": "node mintbot.mjs"
+  },
+  "dependencies": {
+    "ethers": "^6.13.2"
+  }
+}
