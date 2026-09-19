@@ -23,6 +23,7 @@ import { ethers } from 'ethers';
 import { chainCtx } from './lib/chains.mjs';
 import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
 import { mintPublic, mintSigned } from './lib/engine.mjs';
+import { fetchStats, statsText, parseAlert, alertLabel, evalAlert } from './lib/prices.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KEYSTORE_FILE = path.join(__dirname, 'wallet.keystore.json');
@@ -32,6 +33,8 @@ const TICK_MS = 500;
 const PREP_PUBLIC_MS = 60_000; // chuan bi + ky san truoc gio mo public
 const PREP_SIGNED_MS = 20_000;
 const STALE_MESSAGE_S = 10 * 60;
+const PRICE_POLL_MS = Number(process.env.PRICE_POLL_MINUTES || 2) * 60_000;
+const AUTO_ALERT_PCT = 20; // mint xong tu canh floor lech 20% so voi gia mint
 
 // ---------- tien ich ----------
 
@@ -65,6 +68,11 @@ function fmtTime(iso) {
 function toSlug(s) {
   const m = s.match(/opensea\.io\/(?:[a-z-]+\/)?collection\/([^/?#\s]+)/i);
   return m ? m[1].toLowerCase() : null;
+}
+
+/** Link hoac slug tran (vd "reeveworld") */
+function argSlug(s = '') {
+  return toSlug(s) || (/^[a-z0-9][a-z0-9_-]*$/i.test(s) ? s.toLowerCase() : null);
 }
 
 /** Hoi tu ban phim, hidden = khong hien ky tu go */
@@ -104,7 +112,7 @@ function readJobs() {
   } catch {
     d = {};
   }
-  return { jobs: [], nextId: 1, ...d, settings: { max: null, gasBump: 2, disabled: [], ...d.settings } };
+  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, ...d, settings: { max: null, gasBump: 2, disabled: [], ...d.settings } };
 }
 
 let db;
@@ -256,7 +264,18 @@ async function runJob(job, { dry = false } = {}) {
   const head = dry ? `🧪 CHẠY THỬ (không gửi gì): ${tag} x${job.qty}` : `${results.some((x) => x.r.status === 'done') ? '✅ XONG' : '❌ KHÔNG MINT ĐƯỢC'}: ${tag} x${job.qty}`;
   await say(`${head}\n${isPublic ? 'Gọi thẳng contract (mintPublic)' : 'Chữ ký OpenSea → contract (mintSigned)'}\n\n${lines.join('\n')}`);
   if (dry) return null;
-  return finish(job, results.some((x) => x.r.status === 'done') ? 'done' : 'failed');
+  const ok = results.some((x) => x.r.status === 'done');
+  if (ok) autoPriceAlert(job);
+  return finish(job, ok ? 'done' : 'failed');
+}
+
+/** Mint xong -> tu theo doi floor, moc = gia mint */
+function autoPriceAlert(job) {
+  if (db.alerts.some((a) => a.slug === job.slug && a.kind === 'move')) return;
+  const mintPrice = Number(ethers.formatEther(BigInt(job.price || '0')));
+  db.alerts.push({ id: db.nextAlertId++, slug: job.slug, name: job.name, kind: 'move', value: AUTO_ALERT_PCT, base: mintPrice || null, mintPrice });
+  saveJobs();
+  say(`📊 Đã tự theo dõi giá ${job.name}: báo khi floor lệch ±${AUTO_ALERT_PCT}% so với giá mint. /alerts để xem hoặc tắt.`);
 }
 
 function finish(job, status) {
@@ -344,8 +363,32 @@ async function onText(text) {
       '/max 0.01 — giới hạn giá + gas mỗi ví mỗi lần (/max off để bỏ)',
       '/gas 2 — hệ số tip gas, cao = được xếp trước (mặc định 2)',
       '/bal — số dư',
+      '',
+      '/price reeveworld — giá sàn, volume, so với giá mint',
+      '/alert reeveworld < 0.001 — báo khi floor xuống (> để báo khi lên, 15% để báo mỗi lần lệch 15%)',
+      '/alerts — xem / xóa cảnh báo giá',
     ].join('\n'));
   }
+  if (cmd === '/price') {
+    const slug = argSlug(arg);
+    if (!slug) return say('Ví dụ: /price reeveworld hoặc /price <link OpenSea>');
+    const mintJob = db.jobs.find((j) => j.slug === slug && j.status === 'done');
+    const mintPrice = mintJob ? Number(ethers.formatEther(BigInt(mintJob.price || '0'))) : null;
+    return say(statsText(await fetchStats(opensea, slug), mintPrice), [[
+      button('🔔 Báo ±10%', { type: 'alert', slug, rule: { kind: 'move', value: 10 } }),
+      button('🔔 Báo ±25%', { type: 'alert', slug, rule: { kind: 'move', value: 25 } }),
+    ]]);
+  }
+  if (cmd === '/alert') {
+    const parts = text.trim().split(/\s+/).slice(1);
+    const slug = argSlug(parts[0]);
+    const rule = parseAlert(parts.slice(1));
+    if (!slug || !rule) {
+      return say('Ví dụ:\n/alert reeveworld < 0.001  — báo khi floor xuống ≤ 0.001\n/alert reeveworld > 0.01  — báo khi floor lên ≥ 0.01\n/alert reeveworld 15%  — báo mỗi lần floor lệch ±15%');
+    }
+    return addAlert(slug, rule);
+  }
+  if (cmd === '/alerts') return listAlerts();
   if (cmd === '/list') return listJobs();
   if (cmd === '/bal') return showBalances();
   if (cmd === '/wallets') return showWallets();
@@ -370,9 +413,52 @@ async function onText(text) {
   return say('Không hiểu. Dán link opensea.io/collection/... hoặc gõ /help');
 }
 
+async function addAlert(slug, rule) {
+  const s = await fetchStats(opensea, slug); // kiem tra slug ton tai + lay moc ban dau
+  const a = { id: db.nextAlertId++, slug, name: s.name, ...rule, base: rule.kind === 'move' ? s.floor || null : undefined };
+  db.alerts.push(a);
+  saveJobs();
+  return say(`🔔 Đã đặt #${a.id} ${s.name}: ${alertLabel(a)}\nFloor hiện tại: ${s.floor || 'chưa có'} ${s.symbol}. Kiểm tra mỗi ${PRICE_POLL_MS / 60_000} phút.`);
+}
+
+async function listAlerts() {
+  if (db.alerts.length === 0) return say('Chưa có cảnh báo giá nào. Ví dụ: /alert reeveworld 15%');
+  const rows = db.alerts.map((a) => [button(`❌ Xóa #${a.id} ${a.name}`, { type: 'unalert', id: a.id })]);
+  return say(db.alerts.map((a) => `#${a.id} ${a.name}: ${alertLabel(a)}`).join('\n'), rows);
+}
+
+async function priceLoop() {
+  for (;;) {
+    await sleep(PRICE_POLL_MS);
+    const slugs = [...new Set(db.alerts.map((a) => a.slug))];
+    for (const slug of slugs) {
+      let s;
+      try {
+        s = await fetchStats(opensea, slug);
+      } catch (err) {
+        log('[gia]', slug, err.message);
+        continue;
+      }
+      for (const a of db.alerts.filter((x) => x.slug === slug)) {
+        const { fire, remove } = evalAlert(a, s);
+        if (fire) await say(`${fire}\n${s.url}`);
+        if (remove) db.alerts = db.alerts.filter((x) => x !== a);
+      }
+    }
+    if (slugs.length) saveJobs();
+  }
+}
+
 async function onButton(id) {
   const act = actions.get(id);
   if (!act) return say('Nút này đã cũ (bot vừa khởi động lại). Dán lại link để có nút mới.');
+
+  if (act.type === 'alert') return addAlert(act.slug, act.rule);
+  if (act.type === 'unalert') {
+    db.alerts = db.alerts.filter((a) => a.id !== act.id);
+    saveJobs();
+    return say(`Đã xóa cảnh báo #${act.id}`);
+  }
 
   if (act.type === 'toggle') {
     const d = db.settings.disabled;
@@ -513,7 +599,7 @@ async function main() {
   log(`Bot mint dang chay. ${wallets.length} vi: ${wallets.map((w) => `${w.name}=${w.address}`).join(', ')}. ${pending} lan hen. Ctrl+C de dung.`);
   const warn = loaded.failed.length ? `\n⚠️ Không mở được ví: ${loaded.failed.join(', ')}` : '';
   await say(`🤖 Bot mint (contract) đã bật. ${wallets.length} ví, ${activeWallets().length} đang bật, ${pending} lần hẹn.${warn}\nDán link OpenSea để hẹn, /help để xem lệnh.`);
-  await Promise.all([pollTelegram(), scheduler()]);
+  await Promise.all([pollTelegram(), scheduler(), priceLoop()]);
 }
 
 main().catch((err) => {
