@@ -26,6 +26,7 @@ import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
 import { mintPublic, mintSigned, mintNow } from './lib/engine.mjs';
 import { fetchStats, statsText, parseAlert, alertLabel, evalAlert } from './lib/prices.mjs';
 import { hasAuth, jwtExpiry, fetchEligibility, eligIcon } from './lib/eligibility.mjs';
+import { planFund, sendFund, withdrawAll, nftsOf, transferNfts } from './lib/funds.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KEYSTORE_FILE = path.join(__dirname, 'wallet.keystore.json');
@@ -641,6 +642,141 @@ async function showContract(address, chainHint) {
   ]]);
 }
 
+// ---------- nap / rut tien, gom NFT ----------
+
+const CONFIRM_MS = 2 * 60_000; // nut xac nhan het han sau 2 phut
+const fmtE = (v) => ethers.formatEther(v);
+
+function mainWallet() {
+  return wallets.find((w) => w.name === 'main') || wallets[0];
+}
+
+/** Vi nhan khi rut: WITHDRAW_TO trong .env (chi sua duoc tren may), mac dinh vi chinh */
+function withdrawTarget() {
+  const t = (process.env.WITHDRAW_TO || '').trim();
+  if (!t) return mainWallet().address;
+  if (!ethers.isAddress(t)) throw new Error('WITHDRAW_TO trong .env không phải địa chỉ ví hợp lệ');
+  return ethers.getAddress(t);
+}
+
+/** Vi phu dang bat (khong tinh vi nhan) */
+function sideWallets(exclude) {
+  return activeWallets().filter((w) => w.address.toLowerCase() !== exclude.toLowerCase());
+}
+
+function confirmButtons(action) {
+  return [[
+    button('✅ Xác nhận', { type: 'confirm', exp: Date.now() + CONFIRM_MS, ...action }),
+    button('❌ Hủy', { type: 'noop' }),
+  ]];
+}
+
+async function cmdFund(chain, amountStr) {
+  if (!CHAINS[chain] || !/^\d+(\.\d+)?$/.test(amountStr || '')) {
+    return say(`Ví dụ: /fund robinhood 0.001 — ví chính gửi 0.001 cho MỖI ví phụ đang bật.\nChain: ${Object.keys(CHAINS).join(', ')}`);
+  }
+  const from = mainWallet();
+  const targets = sideWallets(from.address);
+  if (targets.length === 0) return say('Không có ví phụ nào đang bật. Thêm ví: node mintbot.mjs addwallet <tên>');
+  const ctx = chainCtx(chain);
+  const amount = ethers.parseEther(amountStr);
+  const plan = await planFund(ctx, from.address, targets.map((w) => w.address), amount);
+  const lines = [
+    `💸 NẠP ${chain}: ${from.name} ${short(from.address)} → ${targets.length} ví, mỗi ví ${amountStr} ${ctx.coin}`,
+    ...targets.map((w) => `  • ${w.name} ${short(w.address)}`),
+    '',
+    `Tổng tối đa (cả gas): ${fmtE(plan.total)} ${ctx.coin}`,
+    `Số dư ví chính: ${fmtE(plan.balance)} ${ctx.coin}`,
+  ];
+  if (!plan.enough) return say([...lines, '', '❌ Ví chính không đủ tiền.'].join('\n'));
+  return say([...lines, '', 'Bấm xác nhận trong 2 phút.'].join('\n'),
+    confirmButtons({ kind: 'fund', chain, amountStr, targets: targets.map((w) => w.address) }));
+}
+
+async function cmdWithdraw(chain) {
+  if (!CHAINS[chain]) return say(`Ví dụ: /withdraw robinhood — mọi ví phụ gửi hết tiền về ví nhận.\nChain: ${Object.keys(CHAINS).join(', ')}`);
+  const to = withdrawTarget();
+  const sources = sideWallets(to);
+  if (sources.length === 0) return say('Không có ví phụ nào để rút.');
+  const ctx = chainCtx(chain);
+  const plans = await Promise.all(sources.map(async (w) => ({ w, r: await withdrawAll(ctx, w, to, { dry: true }).catch((e) => ({ status: 'skipped', note: e.shortMessage || e.message })) })));
+  const ok = plans.filter((p) => p.r.status === 'dry');
+  const total = ok.reduce((s, p) => s + p.r.amount, 0n);
+  const lines = [
+    `🏦 RÚT ${chain} về ${short(to)}${process.env.WITHDRAW_TO ? ' (WITHDRAW_TO)' : ' (ví chính)'}`,
+    ...plans.map(({ w, r }) => `  ${r.status === 'dry' ? '•' : '⏭'} ${w.name} ${short(w.address)}: ${r.status === 'dry' ? `${fmtE(r.amount)} ${ctx.coin}` : r.note}`),
+    '',
+    `Tổng về: ~${fmtE(total)} ${ctx.coin}`,
+  ];
+  if (ok.length === 0) return say(lines.join('\n'));
+  return say([...lines, 'Bấm xác nhận trong 2 phút.'].join('\n'),
+    confirmButtons({ kind: 'withdraw', chain, to, sources: ok.map((p) => p.w.address) }));
+}
+
+async function cmdWithdrawNft(arg) {
+  const slug = argSlug(arg);
+  if (!slug) return say('Ví dụ: /withdrawnft reeveworld — mọi ví phụ chuyển hết NFT collection đó về ví nhận.');
+  const { status, data } = await opensea(`/api/v2/collections/${slug}`);
+  const c = data.contracts?.[0];
+  if (status !== 200 || !c) return say(`Không tìm thấy collection ${slug} trên OpenSea.`);
+  const to = withdrawTarget();
+  const sources = sideWallets(to);
+  if (sources.length === 0) return say('Không có ví phụ nào để gom NFT.');
+  const held = await Promise.all(sources.map(async (w) => ({ w, nfts: await nftsOf(opensea, c.chain, w.address, slug).catch(() => []) })));
+  const has = held.filter((h) => h.nfts.length);
+  const lines = [
+    `🖼 GOM NFT ${data.name || slug} (${c.chain}) về ${short(to)}`,
+    ...held.map(({ w, nfts }) => `  ${nfts.length ? '•' : '⏭'} ${w.name} ${short(w.address)}: ${nfts.length} NFT${nfts.length ? ` (#${nfts.slice(0, 5).map((n) => n.id).join(', #')}${nfts.length > 5 ? '…' : ''})` : ''}`),
+  ];
+  if (has.length === 0) return say([...lines, '', 'Không ví phụ nào giữ NFT này.'].join('\n'));
+  return say([...lines, '', 'Mỗi NFT tốn 1 giao dịch gas. Bấm xác nhận trong 2 phút.'].join('\n'),
+    confirmButtons({ kind: 'nft', chain: c.chain, slug, to, sources: has.map((h) => h.w.address) }));
+}
+
+/** Chay sau khi bam xac nhan. Doc lai so du / NFT luc chay, khong dung so lieu cu */
+async function runConfirmed(act) {
+  const ctx = chainCtx(act.chain);
+  const byAddr = (a) => wallets.find((w) => w.address === a);
+
+  if (act.kind === 'fund') {
+    const from = mainWallet();
+    const amount = ethers.parseEther(act.amountStr);
+    const plan = await planFund(ctx, from.address, act.targets, amount);
+    if (!plan.enough) return say('❌ Ví chính không còn đủ tiền, đã hủy.');
+    await say(`💸 Đang nạp ${act.amountStr} ${ctx.coin} cho ${act.targets.length} ví...`);
+    const res = await sendFund(ctx, from.wallet, act.targets, amount, plan);
+    const ok = res.filter((r) => r.status === 'ok').length;
+    return say([`${ok === act.targets.length ? '✅' : '⚠️'} Nạp xong ${ok}/${act.targets.length} ví`,
+      ...res.map((r) => `  ${r.status === 'ok' ? '✅' : '❌'} ${short(r.to)}: ${r.hash ? ctx.txUrl(r.hash) : r.error}`)].join('\n'));
+  }
+
+  if (act.kind === 'withdraw') {
+    await say(`🏦 Đang rút ${act.sources.length} ví về ${short(act.to)}...`);
+    const res = await Promise.all(act.sources.map(async (a) => {
+      const w = byAddr(a);
+      const r = await withdrawAll(ctx, w, act.to).catch((e) => ({ status: 'failed', note: e.shortMessage || e.message }));
+      return { w, r };
+    }));
+    const total = res.filter((x) => x.r.status === 'done').reduce((s, x) => s + x.r.amount, 0n);
+    return say([`✅ Đã rút ~${fmtE(total)} ${ctx.coin} về ${short(act.to)}`,
+      ...res.map(({ w, r }) => `  ${r.status === 'done' ? '✅' : r.status === 'skipped' ? '⏭' : '❌'} ${w.name}: ${r.status === 'done' ? `${fmtE(r.amount)} ${ctx.txUrl(r.hash)}` : r.note}`)].join('\n'));
+  }
+
+  if (act.kind === 'nft') {
+    await say(`🖼 Đang gom NFT ${act.slug} về ${short(act.to)}...`);
+    const res = await Promise.all(act.sources.map(async (a) => {
+      const w = byAddr(a);
+      const nfts = await nftsOf(opensea, act.chain, w.address, act.slug).catch(() => []);
+      const r = await transferNfts(ctx, w, act.to, nfts).catch((e) => ({ done: 0, failed: nfts.length, skipped: 0, note: e.shortMessage || e.message }));
+      return { w, r };
+    }));
+    const done = res.reduce((s, x) => s + x.r.done, 0);
+    return say([`✅ Đã chuyển ${done} NFT về ${short(act.to)}`,
+      ...res.map(({ w, r }) => `  ${w.name}: ${r.done} xong${r.failed ? `, ${r.failed} lỗi` : ''}${r.skipped ? `, ${r.skipped} bỏ qua (không phải ERC-721)` : ''}${r.note ? ` (${r.note})` : ''}`)].join('\n'));
+  }
+  return null;
+}
+
 async function listJobs() {
   const pending = db.jobs.filter((j) => j.status === 'pending' || j.status === 'running');
   if (pending.length === 0) return say('Chưa có lần hẹn nào. Dán link OpenSea để hẹn.');
@@ -680,6 +816,9 @@ async function onText(text) {
       '/max 0.01 — giới hạn giá + gas mỗi ví mỗi lần (/max off để bỏ)',
       '/gas 2 — hệ số tip gas, cao = được xếp trước (mặc định 2)',
       '/bal — số dư',
+      '/fund robinhood 0.001 — ví chính nạp 0.001 cho MỖI ví phụ đang bật (có nút xác nhận)',
+      '/withdraw robinhood — mọi ví phụ gửi hết tiền về ví chính / WITHDRAW_TO',
+      '/withdrawnft reeveworld — mọi ví phụ chuyển hết NFT collection đó về ví chính / WITHDRAW_TO',
       '',
       '/price reeveworld — giá sàn, volume, so với giá mint',
       '/alert reeveworld < 0.001 — báo khi floor xuống (> để báo khi lên, 15% để báo mỗi lần lệch 15%)',
@@ -708,6 +847,9 @@ async function onText(text) {
     return addAlert(slug, rule);
   }
   if (cmd === '/alerts') return listAlerts();
+  if (cmd === '/fund') return cmdFund((arg || '').toLowerCase(), text.trim().split(/\s+/)[2]);
+  if (cmd === '/withdraw') return cmdWithdraw((arg || '').toLowerCase());
+  if (cmd === '/withdrawnft') return cmdWithdrawNft(arg);
   if (cmd === '/mint') {
     const parts = text.trim().split(/\s+/).slice(1);
     const slug = argSlug(parts[0]);
@@ -819,6 +961,12 @@ async function onButton(id) {
   const act = actions.get(id);
   if (!act) return say('Nút này đã cũ (bot vừa khởi động lại). Dán lại link để có nút mới.');
 
+  if (act.type === 'noop') return say('Đã hủy.');
+  if (act.type === 'confirm') {
+    actions.delete(id); // bam 1 lan duy nhat, bam lai khong gui lan 2
+    if (Date.now() > act.exp) return say('Nút xác nhận đã hết hạn (2 phút). Gõ lại lệnh.');
+    return runConfirmed(act);
+  }
   if (act.type === 'alert') return addAlert(act.slug, act.rule);
   if (act.type === 'unwatch') {
     db.watch = db.watch.filter((s) => s !== act.slug);

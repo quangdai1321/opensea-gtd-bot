@@ -192,3 +192,13 @@ Code: `lib/engine.mjs` (động cơ), `lib/seadrop.mjs` (ABI chuẩn, dịch l�
 ## legacy/ — Tool mint dòng lệnh cũ
 
 `burst.js`, `race.js`, `snipe.js`, `watch-mint.js`, `run-all.js`... Xem `legacy/README.md` và `legacy/CLI.md`. Chạy trong thư mục `legacy/` với `.env` và `wallets/` riêng (không có trong git).
+
+## Nạp / rút tiền, gom NFT (Telegram)
+
+| Lệnh | Làm gì |
+|---|---|
+| `/fund robinhood 0.001` | Ví chính gửi 0.001 cho **mỗi** ví phụ đang bật |
+| `/withdraw robinhood` | Mỗi ví phụ gửi hết tiền (trừ gas) về ví nhận |
+| `/withdrawnft reeveworld` | Mỗi ví phụ chuyển hết NFT (ERC-721) của collection về ví nhận |
+
+Mọi lệnh hiện bản xem trước và nút **✅ Xác nhận** (hết hạn sau 2 phút, bấm 1 lần). Ví nhận = ví chính, hoặc `WITHDRAW_TO` trong `.env`. **Không nhập được địa chỉ nhận qua Telegram**: ai chiếm được Telegram của bạn cũng không rút sang ví khác được.
