@@ -3,7 +3,7 @@
 Mọi lệnh chạy trong thư mục dự án:
 
 ```bash
-cd "/run/media/daitq5/7E1268C012687ED1/Game/Bot-Mint"
+cd /duong/dan/toi/Bot-Mint/legacy
 ```
 
 Trên Windows đổi thành `cd D:\Game\Bot-Mint` (hoặc ổ tương ứng).

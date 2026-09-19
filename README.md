@@ -1,3 +1,28 @@
+# Bot mint + thông báo drop OpenSea qua Telegram
+
+## Người mới: cài đặt trong 5 phút
+
+Mỗi người dùng **bot Telegram, API key và ví của riêng mình**. Repo không chứa bí mật nào của ai.
+
+1. Cài [Node.js](https://nodejs.org) 20+ rồi:
+   ```
+   git clone <link repo>
+   cd <thư mục repo>
+   npm install
+   copy .env.example .env        (Linux/Mac: cp .env.example .env)
+   ```
+2. Điền `.env`: tạo bot Telegram với **@BotFather** → `TELEGRAM_BOT_TOKEN`; nhắn 1 tin cho bot rồi `node notify.mjs chatid` → `TELEGRAM_CHAT_ID`; tạo key tại https://opensea.io/settings/developer → `OPENSEA_API_KEY`.
+3. Tạo ví mint (nên là **burner**, chỉ để ít tiền): `node mintbot.mjs setup`. Thêm ví: `node mintbot.mjs addwallet vi2`.
+4. Chạy: `node mintbot.mjs` → Telegram báo "🤖 Bot mint đã bật" → gõ `/help`.
+
+**Bảo mật:**
+- **Không bao giờ** commit hay gửi cho ai: `.env`, `wallet.keystore.json`, thư mục `wallets/`, `mint-jobs.json`. `.gitignore` đã chặn sẵn.
+- Private key chỉ được mã hóa lưu trên máy bạn (scrypt + AES), code không gửi key đi đâu. Bot chỉ kết nối OpenSea, Telegram, RPC công khai.
+- Bot chỉ nhận lệnh từ `TELEGRAM_CHAT_ID` của bạn.
+- Trước khi `git pull` bản mới, xem qua thay đổi (`git log -p`): code này ký giao dịch bằng ví của bạn.
+
+---
+
 # Noti_tele — Thông báo Telegram khi Codex / Claude Code xong việc
 
 Script `notify.mjs` gửi tin nhắn Telegram khi:
