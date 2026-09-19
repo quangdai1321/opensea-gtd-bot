@@ -20,7 +20,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
-import { chainCtx } from './lib/chains.mjs';
+import { chainCtx, CHAINS } from './lib/chains.mjs';
+import { readPublicDrop } from './lib/seadrop.mjs';
 import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
 import { mintPublic, mintSigned } from './lib/engine.mjs';
 import { fetchStats, statsText, parseAlert, alertLabel, evalAlert } from './lib/prices.mjs';
@@ -285,6 +286,7 @@ async function runJob(job, { dry = false } = {}) {
 
 /** Mint xong -> tu theo doi floor, moc = gia mint */
 function autoPriceAlert(job) {
+  if (!job.slug) return; // mint bang contract, OpenSea chua biet collection
   if (db.alerts.some((a) => a.slug === job.slug && a.kind === 'move')) return;
   const mintPrice = Number(ethers.formatEther(BigInt(job.price || '0')));
   db.alerts.push({ id: db.nextAlertId++, slug: job.slug, name: job.name, kind: 'move', value: AUTO_ALERT_PCT, base: mintPrice || null, mintPrice });
@@ -532,6 +534,82 @@ async function listWatch() {
   return say(`Đang theo dõi:\n${slugs.map((s) => `• ${s}${db.watch.includes(s) ? '' : ' (watch.txt)'}`).join('\n')}\n\n${note}`, rows);
 }
 
+// ---------- mint bang dia chi contract ----------
+
+/**
+ * Tim contract tren cac chain (hoac chain chi dinh), chay song song:
+ *   OpenSea biet contract -> { chain, slug }; khong biet nhung co SeaDrop public drop -> { chain, slug: null }
+ */
+async function findContract(address, chainHint) {
+  const chains = chainHint ? [chainHint] : Object.keys(CHAINS);
+  const found = await Promise.all(chains.map(async (chain) => {
+    const { status, data } = await opensea(`/api/v2/chain/${chain}/contract/${address}`).catch(() => ({}));
+    // Chi tinh khi OpenSea co lich drop that (OpenSea co du lieu rac cho nhieu dia chi)
+    if (status === 200 && data.collection && (await getDrop(data.collection).catch(() => null))) {
+      return { chain, slug: data.collection, name: data.name };
+    }
+    try {
+      const ctx = chainCtx(chain);
+      if ((await ctx.main.getCode(address)) === '0x') return null;
+      const drop = await readPublicDrop(ctx.main, address);
+      return drop.startTime ? { chain, slug: null, name: null, drop } : null;
+    } catch {
+      return null;
+    }
+  }));
+  return found.filter(Boolean);
+}
+
+async function showContract(address, chainHint) {
+  await say(`🔎 Đang tìm contract ${short(address)} ${chainHint ? `trên ${chainHint}` : 'trên mọi chain'}...`);
+  const hits = await findContract(address, chainHint);
+  if (hits.length === 0) {
+    return say(`Không thấy drop SeaDrop nào ở ${address}${chainHint ? ` trên ${chainHint}` : ''}.\nKiểm tra lại địa chỉ, hoặc ghi kèm tên chain: ${Object.keys(CHAINS).join(', ')}`);
+  }
+  if (hits.length > 1 && !chainHint) {
+    return say(`Contract có trên nhiều chain: ${hits.map((h) => h.chain).join(', ')}.\nGửi lại kèm tên chain, ví dụ: ${address} ${hits[0].chain}`);
+  }
+  const hit = hits[0];
+
+  // OpenSea biet du an va co lich drop -> dung the day du (ca GTD/WL)
+  if (hit.slug) {
+    const drop = await addWatch(hit.slug);
+    if (drop) {
+      await showDrop(hit.slug);
+      return eligibilityScan();
+    }
+  }
+
+  // Chi co tren chain: doc public drop tu contract
+  const ctx = chainCtx(hit.chain);
+  const d = hit.drop || (await readPublicDrop(ctx.main, address));
+  if (!d.startTime) return say(`${hit.name || short(address)} trên ${hit.chain}: contract chưa cấu hình public drop trên SeaDrop.`);
+  const start = new Date(d.startTime * 1000).toISOString();
+  const end = new Date((d.endTime || d.startTime + 30 * 86400) * 1000).toISOString();
+  const now = Date.now();
+  const state = now >= Date.parse(end) ? '⚫ đã đóng' : now >= Date.parse(start) ? '🟢 đang mở' : '🕒 sắp mở';
+  const job = {
+    slug: hit.slug, name: hit.name || `Contract ${short(address)}`, chain: hit.chain, contract: address,
+    label: 'Public', stageUuid: `pub:${hit.chain}:${address.toLowerCase()}`, stageType: 'public_sale',
+    price: d.mintPrice.toString(), startTime: start, endTime: end,
+  };
+  const max = Math.max(1, Math.min(Number(d.maxPerWallet) || 1, 10));
+  const lines = [
+    `${job.name} — chain ${hit.chain} (đọc từ contract)`,
+    `Contract ${address}`,
+    `${state} Public: ${fmtTime(start)} → ${fmtTime(end)} | ${ethers.formatEther(d.mintPrice)} ${ctx.coin} | tối đa ${d.maxPerWallet}/ví`,
+    '',
+    'GTD/WL chỉ hẹn được qua link OpenSea (cần chữ ký OpenSea).',
+  ];
+  if (now >= Date.parse(end)) return say(lines.join('\n'));
+  const verb = now >= Date.parse(start) ? '⚡ Mint ngay' : '⏰ Auto';
+  const type = now >= Date.parse(start) ? 'now' : 'schedule';
+  return say(lines.join('\n'), [[
+    ...[...new Set([1, max])].map((q) => button(`${verb} Public x${q}`, { type, job: { ...job, qty: q } })),
+    button('🧪 Thử', { type: 'dry', job: { ...job, qty: 1 } }),
+  ]]);
+}
+
 async function listJobs() {
   const pending = db.jobs.filter((j) => j.status === 'pending' || j.status === 'running');
   if (pending.length === 0) return say('Chưa có lần hẹn nào. Dán link OpenSea để hẹn.');
@@ -563,6 +641,7 @@ async function onText(text) {
   if (cmd === '/start' || cmd === '/help') {
     return say([
       'Dán link OpenSea (opensea.io/collection/...) để xem lịch, hẹn auto mint, hoặc 🧪 chạy thử.',
+      'Dán địa chỉ contract 0x... (kèm tên chain nếu biết, vd: 0xabc... base) → bot tự tìm chain, hẹn mint Public thẳng contract.',
       'Dán / chuyển tiếp tin có nhiều link (Discord, Twitter...) → bot tự theo dõi hết, báo khi ví có GTD/WL, nhắc 60 phút trước giờ mở, tự bỏ khi dự án mint xong.',
       '/list — các lần hẹn',
       '/wallets — bật/tắt ví tham gia',
@@ -638,7 +717,13 @@ async function onText(text) {
     await say([`Đã tự theo dõi ${ok.length}/${slugs.length} dự án:`, ...ok, ...bad, '', 'Bot sẽ báo khi ví có GTD/WL và nhắc trước giờ mở.'].join('\n'));
     return eligibilityScan();
   }
-  return say('Không hiểu. Dán link opensea.io/collection/... hoặc gõ /help');
+  // Dia chi contract 0x... (kem ten chain neu biet, vd "0xabc... base")
+  const addr = text.match(/\b0x[a-fA-F0-9]{40}\b/);
+  if (addr) {
+    const chain = Object.keys(CHAINS).find((c) => new RegExp(`\\b${c}\\b`, 'i').test(text));
+    return showContract(ethers.getAddress(addr[0].toLowerCase()), chain);
+  }
+  return say('Không hiểu. Dán link opensea.io/collection/..., địa chỉ contract 0x..., hoặc gõ /help');
 }
 
 async function addAlert(slug, rule) {
