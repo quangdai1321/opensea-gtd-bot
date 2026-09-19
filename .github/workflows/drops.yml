@@ -1,0 +1,44 @@
+# Quet OpenSea moi 5 phut, bao Telegram cho giai doan GTD / WL.
+# Secrets can dat trong Settings -> Secrets and variables -> Actions:
+#   OPENSEA_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WATCH_WALLET
+name: OpenSea GTD-WL
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # GitHub co the tre 5-15 phut luc dong
+  workflow_dispatch: # nut "Run workflow" de chay tay
+
+concurrency:
+  group: drops
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # drops-state.json nho da nhac / da kiem tra gi, de khong bao trung giua cac lan chay
+      - uses: actions/cache/restore@v4
+        with:
+          path: drops-state.json
+          key: drops-state-${{ github.run_id }}
+          restore-keys: drops-state-
+
+      - run: node drops.mjs once
+        env:
+          OPENSEA_API_KEY: ${{ secrets.OPENSEA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCH_WALLET: ${{ secrets.WATCH_WALLET }}
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: drops-state.json
+          key: drops-state-${{ github.run_id }}-${{ github.run_attempt }}
