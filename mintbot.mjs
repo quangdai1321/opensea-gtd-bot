@@ -69,7 +69,7 @@ function fmtTime(iso) {
 }
 
 function toSlug(s) {
-  const m = s.match(/opensea\.io\/(?:[a-z-]+\/)?collection\/([^/?#\s]+)/i);
+  const m = s.match(/opensea\.io\/(?:[a-z-]+\/)?collection\/([a-z0-9_-]+)/i);
   return m ? m[1].toLowerCase() : null;
 }
 
@@ -372,7 +372,7 @@ async function eligibilityByWallet(slug, list) {
 
 /** Tat ca link opensea.io/collection/... trong 1 tin (dan hoac chuyen tiep tu Discord/Twitter) */
 function allSlugs(text) {
-  return [...new Set([...text.matchAll(/opensea\.io\/(?:[a-z-]+\/)?collection\/([^/?#\s)\]>]+)/gi)].map((m) => m[1].toLowerCase()))];
+  return [...new Set([...text.matchAll(/opensea\.io\/(?:[a-z-]+\/)?collection\/([a-z0-9_-]+)/gi)].map((m) => m[1].toLowerCase()))];
 }
 
 function watchTxt() {
