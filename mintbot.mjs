@@ -119,7 +119,7 @@ function readJobs() {
   } catch {
     d = {};
   }
-  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, watch: [], eligSeen: {}, stageInfo: {}, reminded: {}, ...d, settings: { max: null, gasBump: 2, disabled: [], autosweep: false, autoretry: true, ...d.settings } };
+  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, watch: [], eligSeen: {}, stageInfo: {}, reminded: {}, ...d, settings: { max: null, gasBump: 2, disabled: [], autosweep: false, autoretry: true, burst: 1, ...d.settings } };
 }
 
 let db;
@@ -802,7 +802,9 @@ async function cmdFund(arg, amountStr) {
     items = targets.map((w) => ({ to: w.address, value: amount }));
     why = `mỗi ví ${amountStr} ${ctx.coin}`;
   } else {
-    const target = await mintCost(ctx, { mintValue });
+    const shots = Math.max(1, Number(db.settings.burst || 1));
+    const target = (await mintCost(ctx, { mintValue })) * BigInt(shots);
+    if (shots > 1) why += ` x${shots} phát burst`;
     items = await planTopUp(ctx, targets.map((w) => w.address), target);
     why += ` (nạp bù cho đủ ${fmtE(target)} ${ctx.coin}/ví)`;
     if (items.length === 0) return say(`✅ Cả ${targets.length} ví phụ đã đủ tiền trên ${chain} (${why}). Không cần nạp.`);
@@ -951,6 +953,7 @@ async function onText(text) {
       '/withdrawnft reeveworld — mọi ví phụ chuyển hết NFT collection đó về ví chính / WITHDRAW_TO',
       '/autosweep on — mint xong tự chuyển NFT + gas thừa của ví phụ về ví chính',
       '/autoretry on|off — mint hỏng mà stage còn mở thì tự thử lại (mặc định BẬT)',
+      '/burst 3 — bắn 3 phát quanh giây mở để lọt block đầu tiên (Public, cần gas gấp 3)',
       '',
       '/price reeveworld — giá sàn, volume, so với giá mint',
       '/alert reeveworld < 0.001 — báo khi floor xuống (> để báo khi lên, 15% để báo mỗi lần lệch 15%)',
@@ -982,6 +985,17 @@ async function onText(text) {
   if (cmd === '/fund') return cmdFund((arg || '').toLowerCase(), text.trim().split(/\s+/)[2]);
   if (cmd === '/withdraw') return cmdWithdraw((arg || '').toLowerCase());
   if (cmd === '/withdrawnft') return cmdWithdrawNft(arg);
+  if (cmd === '/burst') {
+    const n = Number(arg);
+    if (arg && n >= 1 && n <= 5) { db.settings.burst = n; saveJobs(); }
+    else if (arg) return say('Ví dụ: /burst 3 — bắn 3 phát quanh giây mở (1 = tắt, tối đa 5)');
+    return say([
+      `🎯 Burst: ${db.settings.burst > 1 ? `${db.settings.burst} phát` : 'TẮT'}`,
+      'Bot đồng bộ đồng hồ với chain rồi bắn loạt giao dịch ký sẵn quanh đúng giây mở, để lọt vào block đầu tiên.',
+      'Phát tới sớm sẽ revert và tốn chút gas. Mỗi ví cần gas gấp N lần, nhớ /fund lại sau khi đổi.',
+      'Chỉ áp dụng cho giai đoạn Public (gọi thẳng contract).',
+    ].join('\n'));
+  }
   if (cmd === '/autoretry') {
     if (arg === 'on' || arg === 'off') { db.settings.autoretry = arg === 'on'; saveJobs(); }
     return say(`🔁 Tự mint lại khi hỏng (stage còn mở): ${db.settings.autoretry === false ? 'TẮT' : 'BẬT'}
