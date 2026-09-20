@@ -98,6 +98,52 @@ async function main() {
   }
   const best = rows.find((r) => Number.isFinite(r.median) && !r.note.startsWith('SAI'));
   if (best) console.log(`\n=> Nhanh nhat: ${best.name}. Dat RPC nay DAU TIEN trong RPC_${chain.toUpperCase()} (.env).`);
+
+  if (best) await verdict(urls, best);
+}
+
+/**
+ * Do tre mang so voi nhip block: tra loi cau "co vao kip block mo khong".
+ * Giao dich bay mot chieu mat ~rtt/2. Neu tung ay ms dai hon 1 block thi du dong ho
+ * chinh tuyet doi, giao dich van roi vao block sau -> phai ban som va ban nhieu phat.
+ */
+async function verdict(urls, best) {
+  const url = urls.find((u) => mask(u) === best.name.replace('[rieng] ', ''));
+  if (!url) return;
+  let secPerBlock = null;
+  try {
+    const bn = parseInt((await rpc(url, 'eth_blockNumber')).result, 16);
+    const at = async (n) => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getBlockByNumber', params: ['0x' + n.toString(16), false] }),
+        signal: AbortSignal.timeout(8000),
+      });
+      return Number(BigInt((await res.json()).result.timestamp));
+    };
+    const span = 2000;
+    const [t0, t1] = await Promise.all([at(bn - span), at(bn)]);
+    secPerBlock = (t1 - t0) / span;
+  } catch {
+    return;
+  }
+  if (!(secPerBlock > 0)) return;
+
+  const blockMs = secPerBlock * 1000;
+  const oneWay = best.median / 2;
+  const late = oneWay / blockMs;
+  console.log(`\n--- Co vao kip block mo khong ---`);
+  console.log(`nhip block      ~${blockMs.toFixed(0)}ms`);
+  console.log(`do tre 1 chieu  ~${oneWay.toFixed(0)}ms  = ${late.toFixed(1)} block`);
+  if (late < 0.5) {
+    console.log('=> Du nhanh. Ban dung gio mo la co cua vao block dau.');
+  } else {
+    console.log(`=> Giao dich toi noi cham ${late.toFixed(1)} block so voi luc ban.`);
+    console.log('   Engine da tru phan nay (ban som bang oneWay), nhung sai so con lai van ~1 block.');
+    console.log(`   Nen: BURST_SPACING_MS=${Math.max(30, Math.round(blockMs))} va /burst ${Math.min(5, Math.max(3, Math.ceil(late) + 2))}`);
+    console.log('   Muon chac hon nua thi phai co RPC rieng gan sequencer (Alchemy/QuickNode/node tu dung).');
+  }
 }
 
 main().catch((e) => {

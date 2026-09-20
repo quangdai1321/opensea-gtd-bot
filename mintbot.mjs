@@ -361,12 +361,17 @@ async function autoSweep(job) {
   if (!db.settings.autosweep) return;
   const to = withdrawTarget();
   const results = job.results || {};
-  // Stage con mo va vi chua mint duoc -> GIU gas de con thu lai (/mint), chi don vi da xong
-  const stillOpen = job.endTime && Date.parse(job.endTime) > Date.now() + 5 * 60_000;
+  // Stage con mo va vi chua mint duoc -> GIU gas de con thu lai (/mint), chi don vi da xong.
+  // KHONG biet gio dong (job cua "/mint ngay" khong co endTime) -> cung coi nhu con mo:
+  // quet gas cua vi chua mint duoc la tu tay lam hong lan mint ke tiep.
+  const stillOpen = !job.endTime || Date.parse(job.endTime) > Date.now() + 5 * 60_000;
   const used = Object.keys(results).filter((a) => a.toLowerCase() !== to.toLowerCase() && (!stillOpen || results[a]?.status === 'done'));
   const waiting = Object.keys(results).length - used.length - (results[to] || results[ethers.getAddress(to)] ? 1 : 0);
   if (used.length === 0) {
-    if (stillOpen) await say(`🧹 Giữ nguyên gas trong ví phụ vì ${job.label} còn mở tới ${fmtTime(job.endTime)} — thử lại bằng /mint ${job.slug || ''} 1`);
+    if (stillOpen) {
+      const until = job.endTime ? ` tới ${fmtTime(job.endTime)}` : '';
+      await say(`🧹 Giữ nguyên gas trong ví phụ vì ${job.label} còn mở${until} — thử lại bằng /mint ${job.slug || ''} 1`);
+    }
     return;
   }
   if (stillOpen && waiting > 0) await say(`🧹 Giữ gas trong ${waiting} ví chưa mint được (${job.label} còn mở), chỉ dọn ví đã xong.`);

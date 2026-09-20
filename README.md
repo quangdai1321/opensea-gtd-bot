@@ -211,6 +211,36 @@ canh hay không — nhiều drop cạn hàng ngay trong stage allowlist, public 
 Trên Telegram có bản rút gọn: **`/soi <link opensea>`** (hoặc `/soi robinhood 0x54bc...`).
 Lõi phân tích nằm ở `lib/recon.mjs`, dùng chung cho cả dòng lệnh lẫn Telegram.
 
+## Vào cho được block mở
+
+Chain nhanh (Robinhood ~12 block/giây, mỗi block ~100ms) thì trượt một block là mất suất.
+Ba thứ quyết định, theo đúng thứ tự quan trọng:
+
+**1. Độ lệch đồng hồ.** Đồng hồ Windows thường lệch cả giây so với chain — đo thực tế trên
+máy dev là **-1130ms**. `lib/clock.mjs` đo và bù phần này trước mỗi lần bắn. Đừng tắt burst,
+vì chỉ burst mới chạy đồng bộ đồng hồ.
+
+**2. RPC nhanh, đặt đầu tiên.** `node rpcbench.mjs <chain>` đo độ trễ và nói thẳng bạn có
+vào kịp block mở không:
+
+```
+--- Co vao kip block mo khong ---
+nhip block      ~100ms
+do tre 1 chieu  ~28ms  = 0.3 block
+=> Du nhanh. Ban dung gio mo la co cua vao block dau.
+```
+
+Trễ dưới 0,5 block là ổn. Trên 1 block thì cần RPC riêng gần sequencer (Alchemy, QuickNode,
+hoặc node tự dựng), đặt vào `RPC_<CHAIN>` trong `.env` — RPC đầu danh sách được dùng để đo giờ.
+
+**3. Số phát burst.** Mỗi phát là một giao dịch đã ký sẵn, nonce liên tiếp, bắn cách nhau
+`BURST_SPACING_MS`. Phát tới sớm revert (mất ít gas), phát đầu tiên tới sau giờ mở thì ăn.
+Đặt spacing ≈ 1 block để mỗi phát rơi vào một block khác nhau. `/burst 3` là đủ cho chain
+có độ trễ dưới 0,5 block.
+
+Tinh chỉnh trong `.env`: `CLOCK_GAP_MS` (ngưỡng tốt là 60–120; xuống 40 bị rate limit nên
+kém hơn), `BURST_SPACING_MS`, `BURST_MAX`.
+
 ## legacy/ — Tool mint dòng lệnh cũ
 
 `burst.js`, `race.js`, `snipe.js`, `watch-mint.js`, `run-all.js`... Xem `legacy/README.md` và `legacy/CLI.md`. Chạy trong thư mục `legacy/` với `.env` và `wallets/` riêng (không có trong git).
