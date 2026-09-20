@@ -20,8 +20,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ethers } from 'ethers';
+import { loadEnv } from './lib/env.mjs'; // import dau tien: nap .env truoc moi hang so ben duoi
 import { chainCtx, CHAINS } from './lib/chains.mjs';
 import { readPublicDrop } from './lib/seadrop.mjs';
+import { analyze } from './lib/recon.mjs';
 import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
 import { mintPublic, mintSigned, mintNow } from './lib/engine.mjs';
 import { fetchStats, statsText, parseAlert, alertLabel, evalAlert } from './lib/prices.mjs';
@@ -44,20 +46,6 @@ const ELIG_POLL_MS = Number(process.env.ELIG_POLL_MINUTES || 5) * 60_000;
 const RETRY_DELAYS = [400, 700, 1_000, 1_500, 2_000, 3_000, 5_000, 10_000, 20_000, 30_000, 60_000, 120_000, 300_000];
 
 // ---------- tien ich ----------
-
-function loadEnv() {
-  let text = '';
-  try {
-    text = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
-  } catch {
-    return;
-  }
-  for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/i);
-    if (!m || process.env[m[1]]) continue;
-    process.env[m[1]] = m[2].replace(/^(['"])(.*)\1$/, '$2');
-  }
-}
 
 function log(...args) {
   console.log(new Date().toLocaleTimeString('vi-VN', { hour12: false }), ...args);
@@ -935,6 +923,94 @@ async function showBalances() {
   return say(out.join('\n\n') || 'Không có ví nào đang bật.');
 }
 
+/**
+ * /soi <link opensea | slug | chain 0x...>
+ * Doc thang tren chain: con bao nhieu hang, public mo luc nao, phan public vao tay ai.
+ * Muc dich chinh: truoc gio mo biet co dang thuc canh khong.
+ */
+async function cmdRecon(rest) {
+  const parts = (rest || '').trim().split(/\s+/).filter(Boolean);
+  let chain = null;
+  let nft = null;
+  let title = '';
+
+  if (parts.length >= 2 && CHAINS[parts[0].toLowerCase()] && ethers.isAddress(parts[1])) {
+    chain = parts[0].toLowerCase();
+    nft = parts[1];
+  } else if (parts.length >= 2 && ethers.isAddress(parts[0]) && CHAINS[parts[1].toLowerCase()]) {
+    chain = parts[1].toLowerCase();
+    nft = parts[0];
+  } else {
+    const slug = argSlug(parts[0] || '');
+    if (!slug) return say('Ví dụ: /soi <link opensea> — hoặc /soi robinhood 0x54bc...');
+    const drop = await getDrop(slug).catch(() => null);
+    if (!drop?.contract_address) return say(`Không tìm thấy drop ${slug} trên OpenSea. Thử /soi <chain> <0x...>`);
+    chain = drop.chain;
+    nft = drop.contract_address;
+    title = drop.collection_name || slug;
+  }
+  if (!CHAINS[chain]) return say(`Chưa hỗ trợ chain ${chain}. Thêm RPC_${String(chain).toUpperCase()} và CHAINID_${String(chain).toUpperCase()} vào .env.`);
+
+  await say(`🔍 Đang soi ${title || nft} trên ${chain}… (quét log on-chain, có thể mất vài chục giây)`);
+  let r;
+  try {
+    r = await analyze(chainCtx(chain), nft, { topN: 3 });
+  } catch (e) {
+    return say(`Soi lỗi: ${e.shortMessage || e.message}`);
+  }
+  return say(reconText(r, title));
+}
+
+/** Ket qua analyze() -> tin nhan Telegram gon, chi giu cai dung de ra quyet dinh */
+function reconText(r, title) {
+  const L = [`🔍 ${title || r.name || r.address} — ${r.chain}`];
+  if (r.supply != null && r.max != null) {
+    const done = r.max > 0n && r.supply >= r.max;
+    L.push(`Nguồn cung: ${r.supply}/${r.max}${done ? '  ❌ ĐÃ HẾT HÀNG' : `  → còn ${r.max - r.supply}`}`);
+  }
+  if (r.drop) {
+    L.push(`Public: ${ethers.formatEther(r.drop.mintPrice)} ${r.coin}, cap ${r.drop.maxPerWallet}/ví`);
+    L.push(`Mở lúc ${fmtTime(r.drop.startTime * 1000)}`);
+  } else {
+    L.push('(không đọc được public drop từ SeaDrop)');
+  }
+
+  if (r.mints === 0) return `${L.join('\n')}\n\nChưa thấy lần mint nào.`;
+
+  if (r.upcoming) {
+    const u = r.upcoming;
+    L.push('', `⏳ Public chưa mở, còn ${u.minsToOpen.toFixed(0)} phút`);
+    L.push(`${u.windowMin} phút qua đi ${u.recent} cái (~${u.perMin.toFixed(1)}/phút)`);
+    L.push(`→ tới giờ mở ước còn khoảng ${Math.round(u.forecast)} cái`);
+    if (u.perMin > 0 && u.forecast <= 0) L.push('❌ Hết trước giờ mở theo nhịp này — đừng thức canh.');
+    else if (u.forecast < 50) L.push('⚠️ Còn rất ít, phải vào được đúng block mở.');
+    else L.push('✅ Còn hàng, đáng canh.');
+    return L.join('\n');
+  }
+
+  const o = r.opening;
+  if (o?.soldOutBeforeOpen) {
+    L.push('', `❌ Hết hàng TRƯỚC khi public mở (${o.before} cái đi ở các stage allowlist/GTD).`);
+    return L.join('\n');
+  }
+  if (o) {
+    const pubShare = Math.round(((o.count + o.after) / r.mints) * 100);
+    L.push('', `Trước giờ public đã đi ${o.before}/${r.mints} (allowlist/GTD)`);
+    L.push(`Block mở public: ${o.count} cái, ${o.batched} (${o.pct}%) qua contract gom nhiều ví`);
+    L.push(`Phần public chỉ chiếm ~${pubShare}% bộ sưu tập`);
+    L.push(
+      o.pct >= 50
+        ? '→ Public bị gom bằng SỐ LƯỢNG ĐỊA CHỈ, không phải tốc độ. Ví thường vẫn ăn được phần theo cap.'
+        : '→ Public chia đều cho ví thường, bắn sát giờ mở là có cửa.',
+    );
+  }
+  for (const t of r.topTxs.slice(0, 1)) {
+    if (t.recipients > 1) L.push('', `Gom nhiều nhất: ${t.count} cái / 1 giao dịch → ${t.recipients} ví, gas ${t.gwei?.toFixed(3)} gwei`);
+  }
+  if (r.secPerBlock) L.push('', `Nhịp block ~${r.secPerBlock.toFixed(2)}s → BURST_SPACING_MS ~${Math.max(30, Math.round(r.secPerBlock * 1000))}`);
+  return L.join('\n');
+}
+
 async function onText(text) {
   const [cmd, arg] = text.trim().split(/\s+/);
   if (cmd === '/start' || cmd === '/help') {
@@ -945,6 +1021,7 @@ async function onText(text) {
       '/mint <link> 2 — mint NGAY stage đang mở (nhanh nhất), x2 mỗi ví',
       '/list — các lần hẹn',
       '/wallets — bật/tắt ví tham gia',
+      '/soi <link opensea> — soi on-chain: còn bao nhiêu hàng, public có đáng canh không',
       '/max 0.01 — giới hạn giá + gas mỗi ví mỗi lần (/max off để bỏ)',
       '/gas 2 — hệ số tip gas, cao = được xếp trước (mặc định 2)',
       '/bal — số dư',
@@ -1034,6 +1111,7 @@ async function onText(text) {
     saveJobs();
     return say(`Đã đặt giới hạn: ${db.settings.max ?? 'không giới hạn'}`);
   }
+  if (cmd === '/soi') return cmdRecon(text.trim().split(/\s+/).slice(1).join(' '));
   if (cmd === '/gas') {
     const v = Number(arg);
     if (!arg) return say(`Tip gas hiện tại: x${db.settings.gasBump}`);

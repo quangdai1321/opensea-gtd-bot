@@ -189,6 +189,28 @@ RPC riêng nhanh hơn: `RPC_ROBINHOOD=url1,url2` trong `.env`. Ví mint chỉ n�
 
 Code: `lib/engine.mjs` (động cơ), `lib/seadrop.mjs` (ABI chuẩn, dịch lỗi, kiểm tra calldata), `lib/chains.mjs` (RPC, gas), `lib/wallets.mjs` (nạp ví).
 
+## recon.mjs — Soi một drop trước khi cắm bot vào
+
+```
+node recon.mjs robinhood 0x54bc2d6dc962ad37003a47362b28b4766ac895da
+```
+
+Đọc on-chain và trả lời: stage public giá bao nhiêu, cap mỗi ví bao nhiêu, **trước giờ
+public mở thì đã đi mất bao nhiêu hàng**, block mở public bay bao nhiêu cái, và phần đó
+về tay ví thường hay về một contract gom nhiều ví.
+
+Cái cần nhìn là dòng cuối. Nếu phần lớn hàng ở block mở public đi qua **một giao dịch
+rải NFT ra hàng chục ví khác nhau**, thì đó là cuộc đua số lượng địa chỉ chứ không phải
+tốc độ — bot 1 ví vẫn lấy được đúng phần theo cap của nó, nhưng không hơn. Script cũng in
+nhịp block của chain để đặt `BURST_SPACING_MS` cho khớp.
+
+**Nếu public chưa mở**, script chuyển sang dự báo: đếm nhịp tiêu thụ 30 phút gần nhất rồi
+chiếu tới giờ mở, ước lượng còn bao nhiêu cái cho public. Dùng để quyết định có đáng thức
+canh hay không — nhiều drop cạn hàng ngay trong stage allowlist, public mở ra chỉ còn vài cái.
+
+Trên Telegram có bản rút gọn: **`/soi <link opensea>`** (hoặc `/soi robinhood 0x54bc...`).
+Lõi phân tích nằm ở `lib/recon.mjs`, dùng chung cho cả dòng lệnh lẫn Telegram.
+
 ## legacy/ — Tool mint dòng lệnh cũ
 
 `burst.js`, `race.js`, `snipe.js`, `watch-mint.js`, `run-all.js`... Xem `legacy/README.md` và `legacy/CLI.md`. Chạy trong thư mục `legacy/` với `.env` và `wallets/` riêng (không có trong git).

@@ -5,7 +5,8 @@
   "scripts": {
     "drops": "node drops.mjs",
     "mint": "node mintbot.mjs",
-    "rpcbench": "node rpcbench.mjs"
+    "rpcbench": "node rpcbench.mjs",
+    "recon": "node recon.mjs"
   },
   "dependencies": {
     "ethers": "^6.13.2"
