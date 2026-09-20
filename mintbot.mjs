@@ -39,6 +39,8 @@ const STALE_MESSAGE_S = 10 * 60;
 const PRICE_POLL_MS = Number(process.env.PRICE_POLL_MINUTES || 2) * 60_000;
 const AUTO_ALERT_PCT = 20; // mint xong tu canh floor lech 20% so voi gia mint
 const ELIG_POLL_MS = Number(process.env.ELIG_POLL_MINUTES || 5) * 60_000;
+// Mint hong ma stage con mo -> tu thu lai theo cac moc nay (giay)
+const RETRY_DELAYS = [5_000, 10_000, 20_000, 30_000, 60_000, 60_000, 60_000, 120_000, 120_000, 300_000];
 
 // ---------- tien ich ----------
 
@@ -116,7 +118,7 @@ function readJobs() {
   } catch {
     d = {};
   }
-  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, watch: [], eligSeen: {}, stageInfo: {}, reminded: {}, ...d, settings: { max: null, gasBump: 2, disabled: [], autosweep: false, ...d.settings } };
+  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, watch: [], eligSeen: {}, stageInfo: {}, reminded: {}, ...d, settings: { max: null, gasBump: 2, disabled: [], autosweep: false, autoretry: true, ...d.settings } };
 }
 
 let db;
@@ -287,7 +289,7 @@ async function runJob(job, { dry = false } = {}) {
   const isPublic = job.stageType === 'public_sale';
   log(dry ? 'thu' : 'mint', `#${job.id}`, job.slug, job.label, `x${job.qty}`, `${targets.length} vi`);
 
-  const results = await Promise.all(targets.map(async (w) => {
+  const attempt = (list) => Promise.all(list.map(async (w) => {
     const opts = {
       w, nft: job.contract, qty: job.qty, settings: db.settings, dry,
       shouldStop: () => stopFlags.has(job.id),
@@ -315,18 +317,36 @@ async function runJob(job, { dry = false } = {}) {
     return { w, r };
   }));
 
+  let results = await attempt(targets);
+
   if (fast) {
-    // Bo sung thong tin that tu drop (lenh /mint chi co slug)
-    const drop = await dropP.catch(() => null);
-    if (drop) {
-      const st = drop.active_stage;
+    // Bo sung thong tin that tu drop (lenh /mint chi co slug) TRUOC khi tinh thu lai
+    const drop0 = await dropP.catch(() => null);
+    const st0 = drop0?.active_stage;
+    if (drop0) {
       Object.assign(job, {
-        name: drop.collection_name, chain: drop.chain, contract: drop.contract_address,
-        label: st?.label || job.label, stageType: st?.stage_type || job.stageType, price: st?.price || job.price || '0',
-        startTime: st?.start_time || job.startTime, endTime: st?.end_time || job.endTime,
+        name: drop0.collection_name, chain: drop0.chain, contract: drop0.contract_address,
+        label: st0?.label || job.label, stageType: st0?.stage_type || job.stageType, price: st0?.price || job.price || '0',
+        startTime: st0?.start_time || job.startTime, endTime: st0?.end_time || job.endTime,
       });
     }
   }
+
+  // ---- tu mint lai: vi nao 'failed' ma stage con mo thi thu tiep ----
+  if (!dry && db.settings.autoretry !== false) {
+    const endAt = Date.parse(job.endTime) || 0;
+    const canRetry = () => Date.now() < endAt - 20_000 && !stopFlags.has(job.id);
+    for (let i = 0; canRetry() && i < RETRY_DELAYS.length; i++) {
+      const left = results.filter((x) => x.r.status === 'failed' && !/không có quyền|not eligible|đã mint đủ|sold out|hết hàng/i.test(x.r.note || ''));
+      if (left.length === 0) break;
+      await say(`🔁 Thử lại sau ${RETRY_DELAYS[i] / 1000}s cho ${left.length} ví (${job.label} còn mở tới ${fmtTime(job.endTime)})`);
+      await sleep(RETRY_DELAYS[i]);
+      if (!canRetry()) break;
+      const again = await attempt(left.map((x) => x.w));
+      results = results.map((x) => again.find((y) => y.w.address === x.w.address) || x);
+    }
+  }
+
   const txUrl = (h) => (job.chain ? chainCtx(job.chain).txUrl(h) : h);
   const icon = { done: '✅', failed: '❌', skipped: '⏭', dry: '🧪' };
   const lines = results.map(({ w, r }) => `${icon[r.status] || '•'} ${w.name} ${short(w.address)}: ${r.note || ''}${r.hash ? `\n   ${txUrl(r.hash)}` : ''}`);
@@ -927,6 +947,7 @@ async function onText(text) {
       '/withdraw robinhood — mọi ví phụ gửi hết tiền về ví chính / WITHDRAW_TO',
       '/withdrawnft reeveworld — mọi ví phụ chuyển hết NFT collection đó về ví chính / WITHDRAW_TO',
       '/autosweep on — mint xong tự chuyển NFT + gas thừa của ví phụ về ví chính',
+      '/autoretry on|off — mint hỏng mà stage còn mở thì tự thử lại (mặc định BẬT)',
       '',
       '/price reeveworld — giá sàn, volume, so với giá mint',
       '/alert reeveworld < 0.001 — báo khi floor xuống (> để báo khi lên, 15% để báo mỗi lần lệch 15%)',
@@ -958,6 +979,11 @@ async function onText(text) {
   if (cmd === '/fund') return cmdFund((arg || '').toLowerCase(), text.trim().split(/\s+/)[2]);
   if (cmd === '/withdraw') return cmdWithdraw((arg || '').toLowerCase());
   if (cmd === '/withdrawnft') return cmdWithdrawNft(arg);
+  if (cmd === '/autoretry') {
+    if (arg === 'on' || arg === 'off') { db.settings.autoretry = arg === 'on'; saveJobs(); }
+    return say(`🔁 Tự mint lại khi hỏng (stage còn mở): ${db.settings.autoretry === false ? 'TẮT' : 'BẬT'}
+/autoretry on hoặc /autoretry off`);
+  }
   if (cmd === '/autosweep') {
     if (arg === 'on' || arg === 'off') {
       db.settings.autosweep = arg === 'on';
