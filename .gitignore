@@ -17,3 +17,4 @@ wallets/
 result.json
 _state.json
 !.env.example
+mint-log.jsonl
