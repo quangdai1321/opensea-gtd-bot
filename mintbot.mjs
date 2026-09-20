@@ -116,7 +116,7 @@ function readJobs() {
   } catch {
     d = {};
   }
-  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, watch: [], eligSeen: {}, stageInfo: {}, reminded: {}, ...d, settings: { max: null, gasBump: 2, disabled: [], ...d.settings } };
+  return { jobs: [], nextId: 1, alerts: [], nextAlertId: 1, watch: [], eligSeen: {}, stageInfo: {}, reminded: {}, ...d, settings: { max: null, gasBump: 2, disabled: [], autosweep: false, ...d.settings } };
 }
 
 let db;
@@ -336,7 +336,43 @@ async function runJob(job, { dry = false } = {}) {
   if (dry) return null;
   const ok = results.some((x) => x.r.status === 'done');
   if (ok) autoPriceAlert(job);
-  return finish(job, ok ? 'done' : 'failed');
+  finish(job, ok ? 'done' : 'failed');
+  autoSweep(job).catch((err) => say(`⚠️ Dọn sau mint lỗi: ${err.message}. Dùng /withdrawnft và /withdraw để làm tay.`));
+  return true;
+}
+
+/**
+ * Mint xong (thanh cong hay that bai) -> chuyen NFT ve vi nhan roi quet not tien thua.
+ * Chi chay khi /autosweep on. Vi nhan co dinh trong .env nen khong can bam xac nhan.
+ */
+async function autoSweep(job) {
+  if (!db.settings.autosweep) return;
+  const to = withdrawTarget();
+  const used = Object.keys(job.results || {}).filter((a) => a.toLowerCase() !== to.toLowerCase());
+  if (used.length === 0) return;
+  const ctx = chainCtx(job.chain);
+  await sleep(15_000); // cho chain cap nhat so du / chu so huu NFT
+  await say(`🧹 Dọn sau mint ${job.name}: chuyển NFT + gas thừa của ${used.length} ví về ${short(to)}...`);
+
+  const lines = [];
+  for (const addr of used) {
+    const w = wallets.find((x) => x.address === addr);
+    if (!w) continue;
+    let nftPart = '';
+    if (job.slug && job.results[addr]?.status === 'done') {
+      const nfts = await nftsOf(opensea, job.chain, addr, job.slug).catch(() => []);
+      if (nfts.length) {
+        const r = await transferNfts(ctx, w, to, nfts).catch((e) => ({ done: 0, failed: nfts.length, note: e.shortMessage || e.message }));
+        nftPart = `${r.done}/${nfts.length} NFT`;
+      } else {
+        nftPart = 'chưa thấy NFT (OpenSea cập nhật chậm, dùng /withdrawnft sau)';
+      }
+    }
+    const r = await withdrawAll(ctx, w, to).catch((e) => ({ status: 'failed', note: e.shortMessage || e.message }));
+    const gasPart = r.status === 'done' ? `${fmtE(r.amount)} ${ctx.coin}` : r.note;
+    lines.push(`  ${w.name}: ${[nftPart, gasPart].filter(Boolean).join(' | ')}`);
+  }
+  await say([`🧹 Dọn xong về ${short(to)}`, ...lines].join('\n'));
 }
 
 /** Mint xong -> tu theo doi floor, moc = gia mint */
@@ -881,6 +917,7 @@ async function onText(text) {
       '/fund robinhood — tự tính gas cần cho 1 lần mint, nạp bù ví còn thiếu (/fund <link> để tính cả giá mint; /fund robinhood 0.001 để nạp đúng số đó)',
       '/withdraw robinhood — mọi ví phụ gửi hết tiền về ví chính / WITHDRAW_TO',
       '/withdrawnft reeveworld — mọi ví phụ chuyển hết NFT collection đó về ví chính / WITHDRAW_TO',
+      '/autosweep on — mint xong tự chuyển NFT + gas thừa của ví phụ về ví chính',
       '',
       '/price reeveworld — giá sàn, volume, so với giá mint',
       '/alert reeveworld < 0.001 — báo khi floor xuống (> để báo khi lên, 15% để báo mỗi lần lệch 15%)',
@@ -912,6 +949,14 @@ async function onText(text) {
   if (cmd === '/fund') return cmdFund((arg || '').toLowerCase(), text.trim().split(/\s+/)[2]);
   if (cmd === '/withdraw') return cmdWithdraw((arg || '').toLowerCase());
   if (cmd === '/withdrawnft') return cmdWithdrawNft(arg);
+  if (cmd === '/autosweep') {
+    if (arg === 'on' || arg === 'off') {
+      db.settings.autosweep = arg === 'on';
+      saveJobs();
+    }
+    const to = withdrawTarget();
+    return say(`🧹 Tự dọn sau mint: ${db.settings.autosweep ? 'BẬT' : 'TẮT'}${db.settings.autosweep ? ` — NFT + gas thừa của ví phụ tự về ${short(to)} sau mỗi lần mint` : ''}\n/autosweep on hoặc /autosweep off`);
+  }
   if (cmd === '/mint') {
     const parts = text.trim().split(/\s+/).slice(1);
     const slug = argSlug(parts[0]);
