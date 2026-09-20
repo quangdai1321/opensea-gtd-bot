@@ -323,6 +323,7 @@ async function runJob(job, { dry = false } = {}) {
       Object.assign(job, {
         name: drop.collection_name, chain: drop.chain, contract: drop.contract_address,
         label: st?.label || job.label, stageType: st?.stage_type || job.stageType, price: st?.price || job.price || '0',
+        startTime: st?.start_time || job.startTime, endTime: st?.end_time || job.endTime,
       });
     }
   }
@@ -348,8 +349,16 @@ async function runJob(job, { dry = false } = {}) {
 async function autoSweep(job) {
   if (!db.settings.autosweep) return;
   const to = withdrawTarget();
-  const used = Object.keys(job.results || {}).filter((a) => a.toLowerCase() !== to.toLowerCase());
-  if (used.length === 0) return;
+  const results = job.results || {};
+  // Stage con mo va vi chua mint duoc -> GIU gas de con thu lai (/mint), chi don vi da xong
+  const stillOpen = job.endTime && Date.parse(job.endTime) > Date.now() + 5 * 60_000;
+  const used = Object.keys(results).filter((a) => a.toLowerCase() !== to.toLowerCase() && (!stillOpen || results[a]?.status === 'done'));
+  const waiting = Object.keys(results).length - used.length - (results[to] || results[ethers.getAddress(to)] ? 1 : 0);
+  if (used.length === 0) {
+    if (stillOpen) await say(`🧹 Giữ nguyên gas trong ví phụ vì ${job.label} còn mở tới ${fmtTime(job.endTime)} — thử lại bằng /mint ${job.slug || ''} 1`);
+    return;
+  }
+  if (stillOpen && waiting > 0) await say(`🧹 Giữ gas trong ${waiting} ví chưa mint được (${job.label} còn mở), chỉ dọn ví đã xong.`);
   const ctx = chainCtx(job.chain);
   await sleep(15_000); // cho chain cap nhat so du / chu so huu NFT
   await say(`🧹 Dọn sau mint ${job.name}: chuyển NFT + gas thừa của ${used.length} ví về ${short(to)}...`);
