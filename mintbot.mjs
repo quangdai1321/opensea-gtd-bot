@@ -338,7 +338,7 @@ async function runJob(job, { dry = false } = {}) {
     const endAt = Date.parse(job.endTime) || 0;
     const canRetry = () => Date.now() < endAt - 20_000 && !stopFlags.has(job.id);
     for (let i = 0; canRetry() && i < RETRY_DELAYS.length; i++) {
-      const left = results.filter((x) => x.r.status === 'failed' && !/không có quyền|not eligible|đã mint đủ|sold out|hết hàng/i.test(x.r.note || ''));
+      const left = results.filter((x) => x.r.status === 'failed' && !/không có quyền|not eligible|đã mint đủ|sold out|hết hàng|minted out|max supply|vượt giới hạn|exceeds/i.test(x.r.note || ''));
       if (left.length === 0) break;
       // Khong await: gui tin Telegram mat ~0.5s, du de lo mat suat
       if (i === 0 || i === 6) say(`🔁 Thử lại (lần ${i + 1}) cho ${left.length} ví — ${job.label} còn mở tới ${fmtTime(job.endTime)}`);
