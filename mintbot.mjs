@@ -40,7 +40,8 @@ const PRICE_POLL_MS = Number(process.env.PRICE_POLL_MINUTES || 2) * 60_000;
 const AUTO_ALERT_PCT = 20; // mint xong tu canh floor lech 20% so voi gia mint
 const ELIG_POLL_MS = Number(process.env.ELIG_POLL_MINUTES || 5) * 60_000;
 // Mint hong ma stage con mo -> tu thu lai theo cac moc nay (giay)
-const RETRY_DELAYS = [5_000, 10_000, 20_000, 30_000, 60_000, 60_000, 60_000, 120_000, 120_000, 300_000];
+// Drop tranh nhau: vai giay dau la quyet dinh -> thu lai gap, sau do gian dan
+const RETRY_DELAYS = [400, 700, 1_000, 1_500, 2_000, 3_000, 5_000, 10_000, 20_000, 30_000, 60_000, 120_000, 300_000];
 
 // ---------- tien ich ----------
 
@@ -339,7 +340,9 @@ async function runJob(job, { dry = false } = {}) {
     for (let i = 0; canRetry() && i < RETRY_DELAYS.length; i++) {
       const left = results.filter((x) => x.r.status === 'failed' && !/không có quyền|not eligible|đã mint đủ|sold out|hết hàng/i.test(x.r.note || ''));
       if (left.length === 0) break;
-      await say(`🔁 Thử lại sau ${RETRY_DELAYS[i] / 1000}s cho ${left.length} ví (${job.label} còn mở tới ${fmtTime(job.endTime)})`);
+      // Khong await: gui tin Telegram mat ~0.5s, du de lo mat suat
+      if (i === 0 || i === 6) say(`🔁 Thử lại (lần ${i + 1}) cho ${left.length} ví — ${job.label} còn mở tới ${fmtTime(job.endTime)}`);
+      log('thu lai', `#${job.id}`, `lan ${i + 1}`, `${left.length} vi`, `sau ${RETRY_DELAYS[i]}ms`);
       await sleep(RETRY_DELAYS[i]);
       if (!canRetry()) break;
       const again = await attempt(left.map((x) => x.w));
