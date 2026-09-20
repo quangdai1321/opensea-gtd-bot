@@ -26,7 +26,7 @@ import { loadWallets, keystoreFiles, short } from './lib/wallets.mjs';
 import { mintPublic, mintSigned, mintNow } from './lib/engine.mjs';
 import { fetchStats, statsText, parseAlert, alertLabel, evalAlert } from './lib/prices.mjs';
 import { hasAuth, jwtExpiry, fetchEligibility, eligIcon } from './lib/eligibility.mjs';
-import { planFund, sendFund, withdrawAll, nftsOf, transferNfts } from './lib/funds.mjs';
+import { planFund, sendFund, withdrawAll, nftsOf, transferNfts, mintCost, planTopUp } from './lib/funds.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const KEYSTORE_FILE = path.join(__dirname, 'wallet.keystore.json');
@@ -704,26 +704,55 @@ function confirmButtons(action) {
   ]];
 }
 
-async function cmdFund(chain, amountStr) {
-  if (!CHAINS[chain] || !/^\d+(\.\d+)?$/.test(amountStr || '')) {
-    return say(`Ví dụ: /fund robinhood 0.001 — ví chính gửi 0.001 cho MỖI ví phụ đang bật.\nChain: ${Object.keys(CHAINS).join(', ')}`);
-  }
+/**
+ * /fund <chain>          -> tu tinh gas 1 lan mint, nap BU cho vi con thieu
+ * /fund <link OpenSea>   -> tu tinh gas + gia mint x gioi han moi vi cua dung drop do
+ * /fund <chain> <so>     -> nap dung so do cho moi vi
+ */
+async function cmdFund(arg, amountStr) {
   const from = mainWallet();
   const targets = sideWallets(from.address);
   if (targets.length === 0) return say('Không có ví phụ nào đang bật. Thêm ví: node mintbot.mjs addwallet <tên>');
+
+  let chain = CHAINS[arg] ? arg : null;
+  let why = 'đủ gas cho 1 lần mint';
+  let mintValue = 0n;
+  if (!chain) {
+    const slug = argSlug(arg);
+    const drop = slug ? await getDrop(slug).catch(() => null) : null;
+    if (!drop) return say(`Ví dụ:\n/fund robinhood — tự tính gas, nạp bù ví còn thiếu\n/fund <link OpenSea> — tự tính gas + giá mint của drop đó\n/fund robinhood 0.001 — nạp đúng 0.001 cho mỗi ví\nChain: ${Object.keys(CHAINS).join(', ')}`);
+    chain = drop.chain;
+    const st = [...(drop.stages || [])].sort((a, b) => Number(b.price || 0) - Number(a.price || 0))[0];
+    mintValue = BigInt(st?.price || '0') * BigInt(Math.max(1, Number(st?.max_per_wallet) || 1));
+    why = `đủ gas + ${fmtE(mintValue)} tiền mint (${drop.collection_name})`;
+  }
   const ctx = chainCtx(chain);
-  const amount = ethers.parseEther(amountStr);
-  const plan = await planFund(ctx, from.address, targets.map((w) => w.address), amount);
+
+  let items;
+  if (amountStr && /^\d+(\.\d+)?$/.test(amountStr)) {
+    const amount = ethers.parseEther(amountStr);
+    items = targets.map((w) => ({ to: w.address, value: amount }));
+    why = `mỗi ví ${amountStr} ${ctx.coin}`;
+  } else {
+    const target = await mintCost(ctx, { mintValue });
+    items = await planTopUp(ctx, targets.map((w) => w.address), target);
+    why += ` (nạp bù cho đủ ${fmtE(target)} ${ctx.coin}/ví)`;
+    if (items.length === 0) return say(`✅ Cả ${targets.length} ví phụ đã đủ tiền trên ${chain} (${why}). Không cần nạp.`);
+  }
+
+  const name = (a) => targets.find((w) => w.address === a)?.name || short(a);
+  const plan = await planFund(ctx, from.address, items);
   const lines = [
-    `💸 NẠP ${chain}: ${from.name} ${short(from.address)} → ${targets.length} ví, mỗi ví ${amountStr} ${ctx.coin}`,
-    ...targets.map((w) => `  • ${w.name} ${short(w.address)}`),
+    `💸 NẠP ${chain}: ${from.name} ${short(from.address)} → ${items.length}/${targets.length} ví`,
+    why,
+    ...items.map((i) => `  • ${name(i.to)} ${short(i.to)}: +${fmtE(i.value)}${i.balance !== undefined ? ` (đang có ${fmtE(i.balance)})` : ''}`),
     '',
     `Tổng tối đa (cả gas): ${fmtE(plan.total)} ${ctx.coin}`,
     `Số dư ví chính: ${fmtE(plan.balance)} ${ctx.coin}`,
   ];
   if (!plan.enough) return say([...lines, '', '❌ Ví chính không đủ tiền.'].join('\n'));
   return say([...lines, '', 'Bấm xác nhận trong 2 phút.'].join('\n'),
-    confirmButtons({ kind: 'fund', chain, amountStr, targets: targets.map((w) => w.address) }));
+    confirmButtons({ kind: 'fund', chain, items: items.map((i) => ({ to: i.to, value: i.value.toString() })) }));
 }
 
 async function cmdWithdraw(chain) {
@@ -773,13 +802,13 @@ async function runConfirmed(act) {
 
   if (act.kind === 'fund') {
     const from = mainWallet();
-    const amount = ethers.parseEther(act.amountStr);
-    const plan = await planFund(ctx, from.address, act.targets, amount);
+    const items = act.items.map((i) => ({ to: i.to, value: BigInt(i.value) }));
+    const plan = await planFund(ctx, from.address, items);
     if (!plan.enough) return say('❌ Ví chính không còn đủ tiền, đã hủy.');
-    await say(`💸 Đang nạp ${act.amountStr} ${ctx.coin} cho ${act.targets.length} ví...`);
-    const res = await sendFund(ctx, from.wallet, act.targets, amount, plan);
+    await say(`💸 Đang nạp cho ${items.length} ví...`);
+    const res = await sendFund(ctx, from.wallet, items, plan);
     const ok = res.filter((r) => r.status === 'ok').length;
-    return say([`${ok === act.targets.length ? '✅' : '⚠️'} Nạp xong ${ok}/${act.targets.length} ví`,
+    return say([`${ok === items.length ? '✅' : '⚠️'} Nạp xong ${ok}/${items.length} ví`,
       ...res.map((r) => `  ${r.status === 'ok' ? '✅' : '❌'} ${short(r.to)}: ${r.hash ? ctx.txUrl(r.hash) : r.error}`)].join('\n'));
   }
 
@@ -849,7 +878,7 @@ async function onText(text) {
       '/max 0.01 — giới hạn giá + gas mỗi ví mỗi lần (/max off để bỏ)',
       '/gas 2 — hệ số tip gas, cao = được xếp trước (mặc định 2)',
       '/bal — số dư',
-      '/fund robinhood 0.001 — ví chính nạp 0.001 cho MỖI ví phụ đang bật (có nút xác nhận)',
+      '/fund robinhood — tự tính gas cần cho 1 lần mint, nạp bù ví còn thiếu (/fund <link> để tính cả giá mint; /fund robinhood 0.001 để nạp đúng số đó)',
       '/withdraw robinhood — mọi ví phụ gửi hết tiền về ví chính / WITHDRAW_TO',
       '/withdrawnft reeveworld — mọi ví phụ chuyển hết NFT collection đó về ví chính / WITHDRAW_TO',
       '',
